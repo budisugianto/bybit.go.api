@@ -6,10 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+)
+
+var (
+	pMux sync.Mutex
 )
 
 type MessageHandler func(message string) error
@@ -195,11 +200,13 @@ func ping(b *WebSocket) {
 				fmt.Println("Failed to marshal ping message:", err)
 				continue
 			}
+			pMux.Lock()
 			if err := b.conn.WriteMessage(websocket.TextMessage, jsonPingMessage); err != nil {
 				fmt.Println("Failed to send ping:", err)
 				return
 			}
-			fmt.Println("Ping sent with UTC time:", currentTime)
+			pMux.Unlock()
+			//fmt.Println("Ping sent with UTC time:", currentTime)
 
 		case <-b.ctx.Done():
 			fmt.Println("Ping context closed, stopping ping.")
