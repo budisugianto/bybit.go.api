@@ -203,6 +203,7 @@ func ping(b *WebSocket) {
 			pMux.Lock()
 			if err := b.conn.WriteMessage(websocket.TextMessage, jsonPingMessage); err != nil {
 				fmt.Println("Failed to send ping:", err)
+				pMux.Unlock()
 				return
 			}
 			pMux.Unlock()
