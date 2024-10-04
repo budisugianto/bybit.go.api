@@ -190,24 +190,28 @@ func ping(b *WebSocket) {
 	for {
 		select {
 		case <-ticker.C:
-			currentTime := time.Now().Unix()
-			pingMessage := map[string]string{
-				"op":     "ping",
-				"req_id": fmt.Sprintf("%d", currentTime),
-			}
-			jsonPingMessage, err := json.Marshal(pingMessage)
-			if err != nil {
-				fmt.Println("Failed to marshal ping message:", err)
-				continue
-			}
-			pMux.Lock()
-			if err := b.conn.WriteMessage(websocket.TextMessage, jsonPingMessage); err != nil {
-				fmt.Println("Failed to send ping:", err)
+			if b.isConnected {
+				currentTime := time.Now().Unix()
+				pingMessage := map[string]string{
+					"op":     "ping",
+					"req_id": fmt.Sprintf("%d", currentTime),
+				}
+				jsonPingMessage, err := json.Marshal(pingMessage)
+				if err != nil {
+					fmt.Println("Failed to marshal ping message:", err)
+					continue
+				}
+				pMux.Lock()
+				if err := b.conn.WriteMessage(websocket.TextMessage, jsonPingMessage); err != nil {
+					fmt.Println("Failed to send ping:", err)
+					pMux.Unlock()
+					return
+				}
 				pMux.Unlock()
-				return
+				//fmt.Println("Ping sent with UTC time:", currentTime)
+			} else {
+				fmt.Println("Ping suspended when disconnected")
 			}
-			pMux.Unlock()
-			//fmt.Println("Ping sent with UTC time:", currentTime)
 
 		case <-b.ctx.Done():
 			fmt.Println("Ping context closed, stopping ping.")
