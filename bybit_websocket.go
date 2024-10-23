@@ -19,6 +19,18 @@ var (
 
 type MessageHandler func(message string) error
 
+func (b *WebSocket) ReConnect() {
+	b.Disconnect(b.autoReconnect)
+	time.Sleep(2 * time.Second)
+	con := b.Connect() // Example, adjust parameters as needed
+	if con == nil {
+		fmt.Println("Reconnection failed:")
+	} else {
+		b.isConnected = true
+		//go b.handleIncomingMessages() // Restart message handling
+	}
+}
+
 func (b *WebSocket) handleIncomingMessages() {
 	for {
 		_, message, err := b.conn.ReadMessage()
@@ -43,27 +55,14 @@ func (b *WebSocket) monitorConnection() {
 	defer ticker.Stop()
 
 	for {
-		<-ticker.C
-		if !b.isConnected && b.ctx.Err() == nil { // Check if disconnected and context not done
-			fmt.Println("Attempting to reconnect...")
-			b.Disconnect(b.autoReconnect)
-			go func(bx *WebSocket) {
-				b := bx // save a copy
-				time.Sleep(2 * time.Second)
-				con := b.Connect() // Example, adjust parameters as needed
-				if con == nil {
-					fmt.Println("Reconnection failed:")
-				} else {
-					b.isConnected = true
-					//go b.handleIncomingMessages() // Restart message handling
-				}
-			}(b)
-		}
-
 		select {
+		case <-ticker.C:
+			if !b.isConnected && b.ctx.Err() == nil { // Check if disconnected and context not done
+				fmt.Println("Attempting to reconnect...")
+				go b.ReConnect()
+			}
 		case <-b.ctx.Done():
 			return // Stop the routine if context is done
-		default:
 		}
 	}
 }
@@ -135,11 +134,17 @@ func (b *WebSocket) Connect() *WebSocket {
 	if b.maxAliveTime != "" {
 		wssUrl += "?max_alive_time=" + b.maxAliveTime
 	}
+
 	b.conn, _, err = websocket.DefaultDialer.Dial(wssUrl, nil)
+	if err != nil {
+		fmt.Printf("Failed Dial: %v", err)
+		go b.ReConnect()
+	}
 
 	if b.requiresAuthentication() {
 		if err = b.sendAuth(); err != nil {
 			fmt.Println("Failed Connection:", fmt.Sprintf("%v", err))
+			go b.ReConnect()
 			return nil
 		}
 	}
@@ -206,16 +211,16 @@ func ping(b *WebSocket) {
 				jsonPingMessage, err := json.Marshal(pingMessage)
 				if err != nil {
 					fmt.Println("Failed to marshal ping message:", err)
-					continue
+					goto exittick
 				}
 				pMux.Lock()
 				if err := b.conn.WriteMessage(websocket.TextMessage, jsonPingMessage); err != nil {
 					fmt.Println("Failed to send ping:", err)
-					pMux.Unlock()
-					return
+				} else {
+					//fmt.Println("Ping sent with UTC time:", currentTime)
 				}
 				pMux.Unlock()
-				//fmt.Println("Ping sent with UTC time:", currentTime)
+			exittick:
 			} else {
 				fmt.Println("Ping suspended when disconnected")
 			}
