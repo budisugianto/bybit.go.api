@@ -20,8 +20,10 @@ var (
 type MessageHandler func(message string) error
 
 func (b *WebSocket) ReConnect() {
+	fmt.Println("Cleaning by disconnect...")
 	b.Disconnect(b.autoReconnect)
 	time.Sleep(2 * time.Second)
+	fmt.Println("Attempting to reconnect...")
 	con := b.Connect() // Example, adjust parameters as needed
 	if con == nil {
 		fmt.Println("Reconnection failed:")
@@ -32,6 +34,7 @@ func (b *WebSocket) ReConnect() {
 }
 
 func (b *WebSocket) handleIncomingMessages() {
+	fmt.Println("Setup handle incoming message")
 	for {
 		_, message, err := b.conn.ReadMessage()
 		if err != nil {
@@ -53,15 +56,15 @@ func (b *WebSocket) handleIncomingMessages() {
 func (b *WebSocket) monitorConnection() {
 	ticker := time.NewTicker(time.Second * 5) // Check every 5 seconds
 	defer ticker.Stop()
-
+	fmt.Println("Setup connection monitoring...")
 	for {
 		select {
 		case <-ticker.C:
 			if !b.isConnected && b.ctx.Err() == nil { // Check if disconnected and context not done
-				fmt.Println("Attempting to reconnect...")
 				go b.ReConnect()
 			}
 		case <-b.ctx.Done():
+			fmt.Println("Exiting conn monitoring...")
 			return // Stop the routine if context is done
 		}
 	}
@@ -191,6 +194,7 @@ func (b *WebSocket) sendRequest(op string, args map[string]interface{}, headers 
 }
 
 func ping(b *WebSocket) {
+	fmt.Println("Setup ping handler...")
 	if b.pingInterval <= 0 {
 		fmt.Println("Ping interval is set to a non-positive value.")
 		return
