@@ -28,6 +28,10 @@ func (b *WebSocket) ReConnect() {
 	con := b.Connect() // Example, adjust parameters as needed
 	if con == nil {
 		fmt.Println("Reconnection failed:")
+		b.isConnected = false
+		if b.autoReconnect {
+			go b.ReConnect()
+		}
 	} else {
 		b.isConnected = true
 		//go b.handleIncomingMessages() // Restart message handling
@@ -66,12 +70,16 @@ func (b *WebSocket) monitorConnection() {
 		select {
 		case <-ticker.C:
 			if !b.isConnected && b.ctx.Err() == nil { // Check if disconnected and context not done
-				go b.ReConnect()
+				if b.autoReconnect {
+					go b.ReConnect()
+				}
 			}
 			rMux.RLock()
 			if time.Since(b.lastReceive) > time.Duration(b.pingInterval)*time.Second {
 				fmt.Println("No data received within ping interval ", b.url)
-				go b.ReConnect()
+				if b.autoReconnect {
+					go b.ReConnect()
+				}
 			}
 			rMux.RUnlock()
 		case <-b.ctx.Done():
@@ -96,6 +104,7 @@ type WebSocket struct {
 	onMessage     MessageHandler
 	ctx           context.Context
 	cancel        context.CancelFunc
+	subtopic      []string
 	isConnected   bool
 	autoReconnect bool
 }
@@ -153,18 +162,12 @@ func (b *WebSocket) Connect() *WebSocket {
 	b.conn, _, err = websocket.DefaultDialer.Dial(wssUrl, nil)
 	if err != nil {
 		fmt.Printf("Failed Dial: %v", err)
-		if b.autoReconnect {
-			go b.ReConnect()
-		}
 		return nil
 	}
 
 	if b.requiresAuthentication() {
 		if err = b.sendAuth(); err != nil {
 			fmt.Println("Failed Connection:", fmt.Sprintf("%v", err))
-			if b.autoReconnect {
-				go b.ReConnect()
-			}
 			return nil
 		}
 	}
@@ -176,10 +179,18 @@ func (b *WebSocket) Connect() *WebSocket {
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	go ping(b)
 
+	if len(b.subtopic) > 0 {
+		_, err := b.SendSubscription(b.subtopic)
+		if err != nil {
+			return nil
+		}
+	}
+
 	return b
 }
 
 func (b *WebSocket) SendSubscription(args []string) (*WebSocket, error) {
+	b.subtopic = args
 	reqID := uuid.New().String()
 	subMessage := map[string]interface{}{
 		"req_id": reqID,
