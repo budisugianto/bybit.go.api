@@ -13,25 +13,18 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-type ConnStat int
-
-const (
-	Disconnected ConnStat = iota
-	Reconnected
-	Connected
-)
-
 var (
 	pMux sync.Mutex
+	rMux sync.RWMutex
 )
 
 type MessageHandler func(message string) error
 
 func (b *WebSocket) ReConnect() {
-	fmt.Println("Cleaning by disconnect...")
+	fmt.Println("Cleaning by disconnect ", b.url)
 	b.Disconnect(b.autoReconnect)
 	time.Sleep(2 * time.Second)
-	fmt.Println("Attempting to reconnect...")
+	fmt.Println("Attempting to reconnect ", b.url)
 	con := b.Connect() // Example, adjust parameters as needed
 	if con == nil {
 		fmt.Println("Reconnection failed:")
@@ -50,6 +43,9 @@ func (b *WebSocket) handleIncomingMessages() {
 			b.isConnected = false
 			return
 		}
+		rMux.Lock()
+		b.lastReceive = time.Now()
+		rMux.Unlock()
 
 		if b.onMessage != nil {
 			err := b.onMessage(string(message))
@@ -65,12 +61,19 @@ func (b *WebSocket) monitorConnection() {
 	ticker := time.NewTicker(time.Second * 5) // Check every 5 seconds
 	defer ticker.Stop()
 	fmt.Println("Setup connection monitoring ", b.url)
+	b.lastReceive = time.Now()
 	for {
 		select {
 		case <-ticker.C:
 			if !b.isConnected && b.ctx.Err() == nil { // Check if disconnected and context not done
 				go b.ReConnect()
 			}
+			rMux.RLock()
+			if time.Since(b.lastReceive) > time.Duration(b.pingInterval)*time.Second {
+				fmt.Println("No data received within ping interval ", b.url)
+				go b.ReConnect()
+			}
+			rMux.RUnlock()
 		case <-b.ctx.Done():
 			fmt.Println("Exiting conn monitoring ", b.url)
 			return // Stop the routine if context is done
@@ -88,12 +91,12 @@ type WebSocket struct {
 	apiKey        string
 	apiSecret     string
 	maxAliveTime  string
+	lastReceive   time.Time
 	pingInterval  int
 	onMessage     MessageHandler
 	ctx           context.Context
 	cancel        context.CancelFunc
 	isConnected   bool
-	connStatus    int
 	autoReconnect bool
 }
 
