@@ -22,16 +22,14 @@ type MessageHandler func(message string) error
 
 func (b *WebSocket) ReConnect() {
 	fmt.Println("Cleaning by disconnect ", b.url)
-	b.Disconnect(b.autoReconnect)
+	b.Disconnect()
 	time.Sleep(2 * time.Second)
 	fmt.Println("Attempting to reconnect ", b.url)
 	con := b.Connect() // Example, adjust parameters as needed
 	if con == nil {
 		fmt.Println("Reconnection failed:")
 		b.isConnected = false
-		if b.autoReconnect {
-			go b.ReConnect()
-		}
+		go b.ReConnect()
 	} else {
 		b.isConnected = true
 		//go b.handleIncomingMessages() // Restart message handling
@@ -70,16 +68,12 @@ func (b *WebSocket) monitorConnection() {
 		select {
 		case <-ticker.C:
 			if !b.isConnected && b.ctx.Err() == nil { // Check if disconnected and context not done
-				if b.autoReconnect {
-					go b.ReConnect()
-				}
+				go b.ReConnect()
 			}
 			rMux.RLock()
 			if time.Since(b.lastReceive) > time.Duration(b.pingInterval)*time.Second {
 				fmt.Println("No data received within ping interval ", b.url)
-				if b.autoReconnect {
-					go b.ReConnect()
-				}
+				go b.ReConnect()
 			}
 			rMux.RUnlock()
 		case <-b.ctx.Done():
@@ -94,19 +88,18 @@ func (b *WebSocket) SetMessageHandler(handler MessageHandler) {
 }
 
 type WebSocket struct {
-	conn          *websocket.Conn
-	url           string
-	apiKey        string
-	apiSecret     string
-	maxAliveTime  string
-	lastReceive   time.Time
-	pingInterval  int
-	onMessage     MessageHandler
-	ctx           context.Context
-	cancel        context.CancelFunc
-	subtopic      []string
-	isConnected   bool
-	autoReconnect bool
+	conn         *websocket.Conn
+	url          string
+	apiKey       string
+	apiSecret    string
+	maxAliveTime string
+	lastReceive  time.Time
+	pingInterval int
+	onMessage    MessageHandler
+	ctx          context.Context
+	cancel       context.CancelFunc
+	subtopic     []string
+	isConnected  bool
 }
 
 type WebsocketOption func(*WebSocket)
@@ -125,13 +118,12 @@ func WithMaxAliveTime(maxAliveTime string) WebsocketOption {
 
 func NewBybitPrivateWebSocket(url, apiKey, apiSecret string, handler MessageHandler, options ...WebsocketOption) *WebSocket {
 	c := &WebSocket{
-		url:           url,
-		apiKey:        apiKey,
-		apiSecret:     apiSecret,
-		maxAliveTime:  "",
-		pingInterval:  20,
-		autoReconnect: true,
-		onMessage:     handler,
+		url:          url,
+		apiKey:       apiKey,
+		apiSecret:    apiSecret,
+		maxAliveTime: "",
+		pingInterval: 20,
+		onMessage:    handler,
 	}
 
 	// Apply the provided options
@@ -264,10 +256,9 @@ func ping(b *WebSocket) {
 	}
 }
 
-func (b *WebSocket) Disconnect(Reconnect bool) error {
+func (b *WebSocket) Disconnect() error {
 	b.cancel()
 	b.isConnected = false
-	b.autoReconnect = Reconnect
 	return b.conn.Close()
 }
 
