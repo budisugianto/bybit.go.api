@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -155,7 +156,14 @@ func (b *WebSocket) Connect() *WebSocket {
 		wssUrl += "?max_alive_time=" + b.maxAliveTime
 	}
 
-	b.conn, _, err = websocket.DefaultDialer.Dial(wssUrl, nil)
+	dialer := &websocket.Dialer{
+		Proxy:            http.ProxyFromEnvironment,
+		HandshakeTimeout: 45 * time.Second,
+		ReadBufferSize:   16384,
+		WriteBufferSize:  4096,
+	}
+
+	b.conn, _, err = dialer.Dial(wssUrl, nil)
 	if err != nil {
 		fmt.Printf(time.Now().Format(tstamp), "Failed Dial: %v", err)
 		return nil
