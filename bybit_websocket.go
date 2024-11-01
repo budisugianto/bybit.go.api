@@ -28,7 +28,7 @@ type MessageHandler func(message string) error
 func (b *WebSocket) ReConnect() {
 	fmt.Println(time.Now().Format(tstamp), "Cleaning by disconnect ", b.subtopic)
 	b.Disconnect()
-	time.Sleep(2 * time.Second)
+	b.wg.Wait()
 	fmt.Println(time.Now().Format(tstamp), "Attempting to reconnect ", b.subtopic)
 	con := b.Connect() // Example, adjust parameters as needed
 	if con == nil {
@@ -42,6 +42,8 @@ func (b *WebSocket) ReConnect() {
 }
 
 func (b *WebSocket) handleIncomingMessages() {
+	b.wg.Add(1)
+	defer b.wg.Done()
 	fmt.Println(time.Now().Format(tstamp), "Setup handle incoming message ", b.subtopic)
 	for {
 		_, message, err := b.conn.ReadMessage()
@@ -65,6 +67,8 @@ func (b *WebSocket) handleIncomingMessages() {
 }
 
 func (b *WebSocket) monitorConnection() {
+	b.wg.Add(1)
+	defer b.wg.Done()
 	ticker := time.NewTicker(time.Second * 5) // Check every 5 seconds
 	defer ticker.Stop()
 	fmt.Println(time.Now().Format(tstamp), "Setup connection monitoring ", b.subtopic)
@@ -105,6 +109,7 @@ type WebSocket struct {
 	cancel       context.CancelFunc
 	subtopic     []string
 	isConnected  bool
+	wg           sync.WaitGroup
 }
 
 type WebsocketOption func(*WebSocket)
@@ -157,10 +162,11 @@ func (b *WebSocket) Connect() *WebSocket {
 	}
 
 	dialer := &websocket.Dialer{
-		Proxy:            http.ProxyFromEnvironment,
-		HandshakeTimeout: 45 * time.Second,
-		ReadBufferSize:   16384,
-		WriteBufferSize:  4096,
+		Proxy:             http.ProxyFromEnvironment,
+		HandshakeTimeout:  45 * time.Second,
+		ReadBufferSize:    16384,
+		WriteBufferSize:   4096,
+		EnableCompression: true,
 	}
 
 	b.conn, _, err = dialer.Dial(wssUrl, nil)
@@ -226,6 +232,8 @@ func (b *WebSocket) sendRequest(op string, args map[string]interface{}, headers 
 }
 
 func ping(b *WebSocket) {
+	b.wg.Add(1)
+	defer b.wg.Done()
 	fmt.Println(time.Now().Format(tstamp), "Setup ping handler ", b.subtopic)
 	if b.pingInterval <= 0 {
 		fmt.Println(time.Now().Format(tstamp), "Ping interval is set to a non-positive value.")
