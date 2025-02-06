@@ -25,7 +25,7 @@ var (
 
 type MessageHandler func(message string) error
 
-func (b *WebSocket) ReConnect() {
+func (b *WebSocket) ReConnect(delay int) {
 	fmt.Println(time.Now().Format(tstamp), "Cleaning by disconnect ", b.subtopic)
 	b.Disconnect()
 	b.wg.Wait()
@@ -34,7 +34,11 @@ func (b *WebSocket) ReConnect() {
 	if con == nil {
 		fmt.Println(time.Now().Format(tstamp), "Reconnection failed:")
 		b.isConnected = false
-		go b.ReConnect()
+		if delay <= 120 {
+			delay *= 2
+		}
+		time.Sleep(time.Duration(delay) * time.Second) //rate limiting retry
+		go b.ReConnect(delay)
 	} else {
 		b.isConnected = true
 		//go b.handleIncomingMessages() // Restart message handling
@@ -72,17 +76,19 @@ func (b *WebSocket) monitorConnection() {
 	ticker := time.NewTicker(time.Second * 5) // Check every 5 seconds
 	defer ticker.Stop()
 	fmt.Println(time.Now().Format(tstamp), "Setup connection monitoring ", b.subtopic)
+	rMux.Lock()
 	b.lastReceive = time.Now()
+	rMux.Unlock()
 	for {
 		select {
 		case <-ticker.C:
 			if !b.isConnected && b.ctx.Err() == nil { // Check if disconnected and context not done
-				go b.ReConnect()
+				go b.ReConnect(1)
 			}
 			rMux.RLock()
 			if time.Since(b.lastReceive) > time.Duration(b.pingInterval)*time.Second {
 				fmt.Println(time.Now().Format(tstamp), "No data received within ping interval ", b.subtopic)
-				go b.ReConnect()
+				go b.ReConnect(1)
 			}
 			rMux.RUnlock()
 		case <-b.ctx.Done():
@@ -171,7 +177,7 @@ func (b *WebSocket) Connect() *WebSocket {
 
 	b.conn, _, err = dialer.Dial(wssUrl, nil)
 	if err != nil {
-		fmt.Printf(time.Now().Format(tstamp), "Failed Dial: %v", err)
+		fmt.Printf("%s Failed Dial: %v", time.Now().Format(tstamp), err)
 		return nil
 	}
 
@@ -257,13 +263,11 @@ func ping(b *WebSocket) {
 					fmt.Println("Failed to marshal ping message:", err)
 					goto exittick
 				}
-				pMux.Lock()
-				if err := b.conn.WriteMessage(websocket.TextMessage, jsonPingMessage); err != nil {
+				if err := b.send(string(jsonPingMessage)); err != nil {
 					fmt.Println("Failed to send ping:", err)
 				} else {
 					//fmt.Println("Ping sent with UTC time:", currentTime)
 				}
-				pMux.Unlock()
 			exittick:
 			} else {
 				fmt.Println(time.Now().Format(tstamp), "Ping suspended when disconnected ", b.subtopic)
@@ -331,5 +335,7 @@ func (b *WebSocket) sendAsJson(v interface{}) error {
 }
 
 func (b *WebSocket) send(message string) error {
+	pMux.Lock()
+	defer pMux.Unlock()
 	return b.conn.WriteMessage(websocket.TextMessage, []byte(message))
 }
