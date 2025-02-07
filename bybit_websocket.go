@@ -232,7 +232,9 @@ func (b *WebSocket) SendSubscription(args []string) (*WebSocket, error) {
 		"op":     "subscribe",
 		"args":   args,
 	}
-	fmt.Println(time.Now().Format(tstamp), "subscribe msg:", fmt.Sprintf("%v", subMessage["args"]))
+	if debug {
+		fmt.Println(time.Now().Format(tstamp), "subscribe msg:", fmt.Sprintf("%v", subMessage["args"]))
+	}
 	if err := b.sendAsJson(subMessage); err != nil {
 		fmt.Println(time.Now().Format(tstamp), "Failed to send subscription:", err)
 		return b, err
@@ -342,14 +344,18 @@ func (b *WebSocket) sendAuth() error {
 
 	// Convert to hexadecimal instead of base64
 	signature := hex.EncodeToString(h.Sum(nil))
-	fmt.Println("signature generated : " + signature)
+	if debug {
+		fmt.Println("signature generated : " + signature)
+	}
 
 	authMessage := map[string]interface{}{
 		"req_id": uuid.New(),
 		"op":     "auth",
 		"args":   []interface{}{b.apiKey, expires, signature},
 	}
-	fmt.Println("auth args:", fmt.Sprintf("%v", authMessage["args"]))
+	if debug {
+		fmt.Println("auth args:", fmt.Sprintf("%v", authMessage["args"]))
+	}
 	return b.sendAsJson(authMessage)
 }
 
