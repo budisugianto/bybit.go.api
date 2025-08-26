@@ -16,64 +16,118 @@ import (
 
 const (
 	tstamp = "02/01 15:04:05.000"
-)
 
-var (
-	pMux  sync.Mutex
-	rMux  sync.RWMutex
-	debug bool = false
+	// WebSocket Configuration Constants
+	DefaultPingInterval      = 20    // seconds
+	DefaultMonitorInterval   = 5     // seconds
+	DefaultDisconnectTimeout = 15    // seconds
+	DefaultHandshakeTimeout  = 45    // seconds
+	MaxReconnectionDelay     = 120   // seconds
+	DefaultReadBufferSize    = 16384 // bytes
+	DefaultWriteBufferSize   = 4096  // bytes
 )
 
 type MessageHandler func(message string) error
 
 func (b *WebSocket) ReConnect(delay int) {
-	if debug {
+	// Prevent multiple simultaneous reconnection attempts
+	if !b.setReconnecting(true) {
+		if b.debug {
+			fmt.Println(time.Now().Format(tstamp), "Reconnection already in progress ", b.subtopic)
+		}
+		return
+	}
+	defer b.setReconnecting(false)
+
+	if b.debug {
 		fmt.Println(time.Now().Format(tstamp), "Cleaning by disconnect ", b.subtopic)
 	}
 	b.Disconnect()
 	b.wg.Wait()
-	if debug {
-		fmt.Println(time.Now().Format(tstamp), "Attempting to reconnect ", b.subtopic)
-	}
-	con := b.Connect() // Example, adjust parameters as needed
-	if con == nil {
-		if debug {
-			fmt.Println(time.Now().Format(tstamp), "Reconnection failed:")
+
+	// Keep trying to reconnect with exponential backoff
+	currentDelay := delay
+	for {
+		if b.debug {
+			fmt.Println(time.Now().Format(tstamp), "Attempting to reconnect ", b.subtopic)
 		}
-		b.isConnected = false
-		if delay <= 120 {
-			delay *= 2
+		con := b.Connect()
+		if con != nil {
+			b.setConnected(true)
+			if b.debug {
+				fmt.Println(time.Now().Format(tstamp), "Reconnection successful ", b.subtopic)
+			}
+			return
 		}
-		time.Sleep(time.Duration(delay) * time.Second) //rate limiting retry
-		go b.ReConnect(delay)
-	} else {
-		b.isConnected = true
-		//go b.handleIncomingMessages() // Restart message handling
+
+		if b.debug {
+			fmt.Println(time.Now().Format(tstamp), "Reconnection failed, retrying in", currentDelay, "seconds")
+		}
+		b.setConnected(false)
+
+		// Use interruptible sleep that responds to context cancellation
+		timer := time.NewTimer(time.Duration(currentDelay) * time.Second)
+		select {
+		case <-timer.C:
+			// Normal delay completed
+		case <-b.ctx.Done():
+			timer.Stop()
+			if b.debug {
+				fmt.Println(time.Now().Format(tstamp), "Context cancelled during sleep, stopping reconnection")
+			}
+			return
+		}
+
+		if currentDelay <= MaxReconnectionDelay {
+			currentDelay *= 2
+		}
 	}
 }
 
 func (b *WebSocket) handleIncomingMessages() {
 	b.wg.Add(1)
 	defer b.wg.Done()
-	if debug {
+	if b.debug {
 		fmt.Println(time.Now().Format(tstamp), "Setup handle incoming message ", b.subtopic)
 	}
 	for {
-		_, message, err := b.conn.ReadMessage()
-		if err != nil {
-			fmt.Println(time.Now().Format(tstamp), "Error reading:", err)
-			b.isConnected = false
+		// Check if connection is nil before attempting to read (with mutex protection)
+		b.connMux.RLock()
+		conn := b.conn
+		b.connMux.RUnlock()
+
+		if conn == nil {
+			if b.debug {
+				fmt.Println(time.Now().Format(tstamp), "Connection is nil, exiting message handler")
+			}
+			b.setConnected(false)
 			return
 		}
-		rMux.Lock()
+
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			if b.debug {
+				fmt.Println(time.Now().Format(tstamp), "Error reading:", err)
+			}
+			b.setConnected(false)
+			// Only trigger reconnection if context is not cancelled
+			if b.ctx.Err() == nil {
+				go b.ReConnect(1)
+			}
+			return
+		}
+
+		b.receiveMux.Lock()
 		b.lastReceive = time.Now()
-		rMux.Unlock()
+		b.receiveMux.Unlock()
 
 		if b.onMessage != nil {
 			err := b.onMessage(string(message))
 			if err != nil {
 				fmt.Println(time.Now().Format(tstamp), "Error handling message:", err)
-				return
+				// Don't exit on message handler error, just log it
+				// The application should decide whether to disconnect
+				continue
 			}
 		}
 	}
@@ -82,30 +136,30 @@ func (b *WebSocket) handleIncomingMessages() {
 func (b *WebSocket) monitorConnection() {
 	b.wg.Add(1)
 	defer b.wg.Done()
-	ticker := time.NewTicker(time.Second * 5) // Check every 5 seconds
+	ticker := time.NewTicker(DefaultMonitorInterval * time.Second)
 	defer ticker.Stop()
-	if debug {
+	if b.debug {
 		fmt.Println(time.Now().Format(tstamp), "Setup connection monitoring ", b.subtopic)
 	}
-	rMux.Lock()
+	b.receiveMux.Lock()
 	b.lastReceive = time.Now()
-	rMux.Unlock()
+	b.receiveMux.Unlock()
 	for {
 		select {
 		case <-ticker.C:
-			if !b.isConnected && b.ctx.Err() == nil { // Check if disconnected and context not done
+			if !b.isConnectedSafe() && b.ctx.Err() == nil { // Check if disconnected and context not done
 				go b.ReConnect(1)
 			}
-			rMux.RLock()
+			b.receiveMux.RLock()
 			if time.Since(b.lastReceive) > time.Duration(b.pingInterval)*time.Second {
-				if debug {
+				if b.debug {
 					fmt.Println(time.Now().Format(tstamp), "No data received within ping interval ", b.subtopic)
 				}
 				go b.ReConnect(1)
 			}
-			rMux.RUnlock()
+			b.receiveMux.RUnlock()
 		case <-b.ctx.Done():
-			if debug {
+			if b.debug {
 				fmt.Println(time.Now().Format(tstamp), "Exiting conn monitoring ", b.subtopic)
 			}
 			return // Stop the routine if context is done
@@ -117,20 +171,51 @@ func (b *WebSocket) SetMessageHandler(handler MessageHandler) {
 	b.onMessage = handler
 }
 
+// setConnected safely sets the connection state
+func (b *WebSocket) setConnected(connected bool) {
+	b.connMux.Lock()
+	defer b.connMux.Unlock()
+	b.isConnected = connected
+}
+
+// isConnectedSafe safely reads the connection state
+func (b *WebSocket) isConnectedSafe() bool {
+	b.connMux.RLock()
+	defer b.connMux.RUnlock()
+	return b.isConnected
+}
+
+// setReconnecting safely sets the reconnection state
+func (b *WebSocket) setReconnecting(reconnecting bool) bool {
+	b.reconnectMux.Lock()
+	defer b.reconnectMux.Unlock()
+	if reconnecting && b.isReconnecting {
+		return false // Already reconnecting
+	}
+	b.isReconnecting = reconnecting
+	return true
+}
+
 type WebSocket struct {
-	conn         *websocket.Conn
-	url          string
-	apiKey       string
-	apiSecret    string
-	maxAliveTime string
-	lastReceive  time.Time
-	pingInterval int
-	onMessage    MessageHandler
-	ctx          context.Context
-	cancel       context.CancelFunc
-	subtopic     []string
-	isConnected  bool
-	wg           sync.WaitGroup
+	conn           *websocket.Conn
+	url            string
+	apiKey         string
+	apiSecret      string
+	maxAliveTime   string
+	lastReceive    time.Time
+	pingInterval   int
+	onMessage      MessageHandler
+	ctx            context.Context
+	cancel         context.CancelFunc
+	subtopic       []string
+	isConnected    bool
+	isReconnecting bool
+	debug          bool
+	wg             sync.WaitGroup
+	sendMux        sync.Mutex   // Protects WebSocket send operations
+	receiveMux     sync.RWMutex // Protects lastReceive time
+	connMux        sync.RWMutex // Protects isConnected state
+	reconnectMux   sync.Mutex   // Protects reconnection state
 }
 
 type WebsocketOption func(*WebSocket)
@@ -153,7 +238,7 @@ func NewBybitPrivateWebSocket(url, apiKey, apiSecret string, handler MessageHand
 		apiKey:       apiKey,
 		apiSecret:    apiSecret,
 		maxAliveTime: "",
-		pingInterval: 20,
+		pingInterval: DefaultPingInterval,
 		onMessage:    handler,
 	}
 
@@ -168,7 +253,7 @@ func NewBybitPrivateWebSocket(url, apiKey, apiSecret string, handler MessageHand
 func NewBybitPublicWebSocket(url string, handler MessageHandler) *WebSocket {
 	c := &WebSocket{
 		url:          url,
-		pingInterval: 20, // default is 20 seconds
+		pingInterval: DefaultPingInterval,
 		onMessage:    handler,
 	}
 
@@ -176,7 +261,7 @@ func NewBybitPublicWebSocket(url string, handler MessageHandler) *WebSocket {
 }
 
 func (b *WebSocket) SetDebug(dbg bool) {
-	debug = dbg
+	b.debug = dbg
 }
 
 func (b *WebSocket) Connect() *WebSocket {
@@ -188,35 +273,72 @@ func (b *WebSocket) Connect() *WebSocket {
 
 	dialer := &websocket.Dialer{
 		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  45 * time.Second,
-		ReadBufferSize:    16384,
-		WriteBufferSize:   4096,
+		HandshakeTimeout:  DefaultHandshakeTimeout * time.Second,
+		ReadBufferSize:    DefaultReadBufferSize,
+		WriteBufferSize:   DefaultWriteBufferSize,
 		EnableCompression: true,
 	}
 
-	b.conn, _, err = dialer.Dial(wssUrl, nil)
+	conn, _, err := dialer.Dial(wssUrl, nil)
 	if err != nil {
 		fmt.Printf("%s Failed Dial: %v", time.Now().Format(tstamp), err)
 		return nil
 	}
 
+	// Safely assign connection with mutex protection
+	b.connMux.Lock()
+	b.conn = conn
+	b.connMux.Unlock()
+
 	if b.requiresAuthentication() {
 		if err = b.sendAuth(); err != nil {
 			fmt.Println(time.Now().Format(tstamp), "Failed Connection:", fmt.Sprintf("%v", err))
+
+			// Close connection on authentication failure (with mutex protection)
+			b.connMux.Lock()
+			if b.conn != nil {
+				b.conn.Close()
+			}
+			b.connMux.Unlock()
+
 			return nil
 		}
 	}
-	b.isConnected = true
+	b.setConnected(true)
+
+	// Cancel old context before creating new one to prevent resource leaks
+	if b.cancel != nil {
+		b.cancel()
+	}
+
+	// Create context before starting goroutines
+	b.ctx, b.cancel = context.WithCancel(context.Background())
 
 	go b.handleIncomingMessages()
 	go b.monitorConnection()
-
-	b.ctx, b.cancel = context.WithCancel(context.Background())
 	go ping(b)
 
 	if len(b.subtopic) > 0 {
 		_, err := b.SendSubscription(b.subtopic)
 		if err != nil {
+			// Cleanup resources if subscription fails
+			if b.debug {
+				fmt.Println(time.Now().Format(tstamp), "Subscription failed, cleaning up resources:", err)
+			}
+
+			// Cancel context to stop goroutines
+			if b.cancel != nil {
+				b.cancel()
+			}
+
+			// Close connection (with mutex protection)
+			b.connMux.Lock()
+			if b.conn != nil {
+				b.conn.Close()
+			}
+			b.connMux.Unlock()
+
+			b.setConnected(false)
 			return nil
 		}
 	}
@@ -232,14 +354,14 @@ func (b *WebSocket) SendSubscription(args []string) (*WebSocket, error) {
 		"op":     "subscribe",
 		"args":   args,
 	}
-	if debug {
+	if b.debug {
 		fmt.Println(time.Now().Format(tstamp), "subscribe msg:", fmt.Sprintf("%v", subMessage["args"]))
 	}
 	if err := b.sendAsJson(subMessage); err != nil {
 		fmt.Println(time.Now().Format(tstamp), "Failed to send subscription:", err)
 		return b, err
 	}
-	if debug {
+	if b.debug {
 		fmt.Println(time.Now().Format(tstamp), "Subscription sent successfully.")
 	}
 	return b, nil
@@ -263,7 +385,7 @@ func (b *WebSocket) sendRequest(op string, args map[string]interface{}, headers 
 func ping(b *WebSocket) {
 	b.wg.Add(1)
 	defer b.wg.Done()
-	if debug {
+	if b.debug {
 		fmt.Println(time.Now().Format(tstamp), "Setup ping handler ", b.subtopic)
 	}
 	if b.pingInterval <= 0 {
@@ -277,31 +399,22 @@ func ping(b *WebSocket) {
 	for {
 		select {
 		case <-ticker.C:
-			if b.isConnected {
+			if b.isConnectedSafe() {
+				// Optimized ping message creation - avoid map allocation and JSON marshaling
 				currentTime := time.Now().Unix()
-				pingMessage := map[string]string{
-					"op":     "ping",
-					"req_id": fmt.Sprintf("%d", currentTime),
-				}
-				jsonPingMessage, err := json.Marshal(pingMessage)
-				if err != nil {
-					fmt.Println("Failed to marshal ping message:", err)
-					goto exittick
-				}
-				if err := b.send(string(jsonPingMessage)); err != nil {
+				pingMessage := fmt.Sprintf(`{"op":"ping","req_id":"%d"}`, currentTime)
+
+				if err := b.send(pingMessage); err != nil {
 					fmt.Println("Failed to send ping:", err)
-				} else {
-					//fmt.Println("Ping sent with UTC time:", currentTime)
 				}
-			exittick:
 			} else {
-				if debug {
+				if b.debug {
 					fmt.Println(time.Now().Format(tstamp), "Ping suspended when disconnected ", b.subtopic)
 				}
 			}
 
 		case <-b.ctx.Done():
-			if debug {
+			if b.debug {
 				fmt.Println(time.Now().Format(tstamp), "Ping context closed, stopping ping ", b.subtopic)
 			}
 			return
@@ -311,14 +424,48 @@ func ping(b *WebSocket) {
 
 func (b *WebSocket) Disconnect() error {
 	if b != nil {
+		// Cancel context first to stop all goroutines
 		if b.cancel != nil {
 			b.cancel()
 		}
-		b.isConnected = false
+		b.setConnected(false)
+
+		// Close the connection (with mutex protection)
+		var err error
+		b.connMux.Lock()
 		if b.conn != nil {
-			return b.conn.Close()
+			err = b.conn.Close()
 		}
-		return nil
+		b.connMux.Unlock()
+
+		// Wait for all goroutines to finish with a timeout
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			b.wg.Wait()
+		}()
+
+		select {
+		case <-done:
+			// All goroutines finished gracefully
+			if b.debug {
+				fmt.Println(time.Now().Format(tstamp), "All goroutines finished gracefully")
+			}
+		case <-time.After(DefaultDisconnectTimeout * time.Second):
+			// Timeout waiting for goroutines - force cleanup
+			if b.debug {
+				fmt.Println(time.Now().Format(tstamp), "Timeout waiting for goroutines, forcing cleanup")
+			}
+			// Force close connection if still open (with mutex protection)
+			b.connMux.Lock()
+			if b.conn != nil {
+				b.conn.Close()
+				b.conn = nil
+			}
+			b.connMux.Unlock()
+		}
+
+		return err
 	}
 	return nil
 }
@@ -344,16 +491,16 @@ func (b *WebSocket) sendAuth() error {
 
 	// Convert to hexadecimal instead of base64
 	signature := hex.EncodeToString(h.Sum(nil))
-	if debug {
+	if b.debug {
 		fmt.Println("signature generated : " + signature)
 	}
 
 	authMessage := map[string]interface{}{
-		"req_id": uuid.New(),
+		"req_id": uuid.New().String(),
 		"op":     "auth",
 		"args":   []interface{}{b.apiKey, expires, signature},
 	}
-	if debug {
+	if b.debug {
 		fmt.Println("auth args:", fmt.Sprintf("%v", authMessage["args"]))
 	}
 	return b.sendAsJson(authMessage)
@@ -368,7 +515,17 @@ func (b *WebSocket) sendAsJson(v interface{}) error {
 }
 
 func (b *WebSocket) send(message string) error {
-	pMux.Lock()
-	defer pMux.Unlock()
-	return b.conn.WriteMessage(websocket.TextMessage, []byte(message))
+	b.sendMux.Lock()
+	defer b.sendMux.Unlock()
+
+	// Check if connection is nil before attempting to send (with mutex protection)
+	b.connMux.RLock()
+	conn := b.conn
+	b.connMux.RUnlock()
+
+	if conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+
+	return conn.WriteMessage(websocket.TextMessage, []byte(message))
 }
