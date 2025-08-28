@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +26,12 @@ const (
 	MaxReconnectionDelay     = 120   // seconds
 	DefaultReadBufferSize    = 16384 // bytes
 	DefaultWriteBufferSize   = 4096  // bytes
+
+	// Connection health constants
+	DefaultReadTimeout  = 60          // seconds - timeout for read operations
+	DefaultWriteTimeout = 10          // seconds - timeout for write operations
+	MaxMessageSize      = 1024 * 1024 // 1MB - maximum message size
+	PongTimeout         = 60          // seconds - timeout waiting for pong response
 )
 
 type MessageHandler func(message string) error
@@ -117,6 +124,9 @@ func (b *WebSocket) handleIncomingMessages() {
 			return
 		}
 
+		// Reset read deadline for next message
+		conn.SetReadDeadline(time.Now().Add(DefaultReadTimeout * time.Second))
+
 		b.receiveMux.Lock()
 		b.lastReceive = time.Now()
 		b.receiveMux.Unlock()
@@ -143,6 +153,7 @@ func (b *WebSocket) monitorConnection() {
 	}
 	b.receiveMux.Lock()
 	b.lastReceive = time.Now()
+	b.lastPong = time.Now() // Initialize pong time
 	b.receiveMux.Unlock()
 	for {
 		select {
@@ -151,13 +162,18 @@ func (b *WebSocket) monitorConnection() {
 				go b.ReConnect(1)
 			}
 			b.receiveMux.RLock()
-			if time.Since(b.lastReceive) > time.Duration(b.pingInterval)*time.Second {
+			lastReceive := b.lastReceive
+			b.receiveMux.RUnlock()
+
+			if time.Since(lastReceive) > time.Duration(b.pingInterval)*time.Second {
 				if b.debug {
 					fmt.Println(time.Now().Format(tstamp), "No data received within ping interval ", b.subtopic)
 				}
-				go b.ReConnect(1)
+				// Only trigger reconnection if context is still active and not already reconnecting
+				if b.ctx.Err() == nil {
+					go b.ReConnect(1)
+				}
 			}
-			b.receiveMux.RUnlock()
 		case <-b.ctx.Done():
 			if b.debug {
 				fmt.Println(time.Now().Format(tstamp), "Exiting conn monitoring ", b.subtopic)
@@ -203,6 +219,7 @@ type WebSocket struct {
 	apiSecret      string
 	maxAliveTime   string
 	lastReceive    time.Time
+	lastPong       time.Time // Track last pong response for connection health
 	pingInterval   int
 	onMessage      MessageHandler
 	ctx            context.Context
@@ -214,7 +231,7 @@ type WebSocket struct {
 	wg             sync.WaitGroup
 	sendMux        sync.Mutex   // Protects WebSocket send operations
 	receiveMux     sync.RWMutex // Protects lastReceive time
-	connMux        sync.RWMutex // Protects isConnected state
+	connMux        sync.RWMutex // Protects isConnected state and connection
 	reconnectMux   sync.Mutex   // Protects reconnection state
 }
 
@@ -284,6 +301,25 @@ func (b *WebSocket) Connect() *WebSocket {
 		fmt.Printf("%s Failed Dial: %v", time.Now().Format(tstamp), err)
 		return nil
 	}
+
+	// Configure connection-level settings for persistent connections
+	conn.SetReadLimit(MaxMessageSize)
+	conn.SetReadDeadline(time.Now().Add(DefaultReadTimeout * time.Second))
+
+	// Set up pong handler for proper ping/pong cycle
+	conn.SetPongHandler(func(appData string) error {
+		if b.debug {
+			fmt.Println(time.Now().Format(tstamp), "Received pong from server")
+		}
+		// Update last pong time for connection health monitoring
+		b.receiveMux.Lock()
+		b.lastPong = time.Now()
+		b.receiveMux.Unlock()
+
+		// Reset read deadline when we receive a pong
+		conn.SetReadDeadline(time.Now().Add(DefaultReadTimeout * time.Second))
+		return nil
+	})
 
 	// Safely assign connection with mutex protection
 	b.connMux.Lock()
@@ -406,6 +442,18 @@ func ping(b *WebSocket) {
 
 				if err := b.send(pingMessage); err != nil {
 					fmt.Println("Failed to send ping:", err)
+					// Force immediate reconnection on network connection errors
+					if strings.Contains(err.Error(), "use of closed network connection") ||
+						strings.Contains(err.Error(), "connection reset by peer") ||
+						strings.Contains(err.Error(), "broken pipe") {
+						if b.debug {
+							fmt.Println(time.Now().Format(tstamp), "Network error detected in ping, triggering reconnection")
+						}
+						b.setConnected(false)
+						if b.ctx.Err() == nil {
+							go b.ReConnect(1)
+						}
+					}
 				}
 			} else {
 				if b.debug {
@@ -526,6 +574,9 @@ func (b *WebSocket) send(message string) error {
 	if conn == nil {
 		return fmt.Errorf("connection is nil")
 	}
+
+	// Set write deadline for persistent connection reliability
+	conn.SetWriteDeadline(time.Now().Add(DefaultWriteTimeout * time.Second))
 
 	return conn.WriteMessage(websocket.TextMessage, []byte(message))
 }
