@@ -49,7 +49,10 @@ func (b *WebSocket) ReConnect(delay int) {
 	if b.debug {
 		fmt.Println(time.Now().Format(tstamp), "Cleaning by disconnect ", b.subtopic)
 	}
-	b.Disconnect()
+	// Best-effort disconnect; log error in debug mode
+	if err := b.Disconnect(); err != nil && b.debug {
+		fmt.Println(time.Now().Format(tstamp), "Disconnect error:", err)
+	}
 	b.wg.Wait()
 
 	// Keep trying to reconnect with exponential backoff
@@ -125,7 +128,9 @@ func (b *WebSocket) handleIncomingMessages() {
 		}
 
 		// Reset read deadline for next message
-		conn.SetReadDeadline(time.Now().Add(DefaultReadTimeout * time.Second))
+		if err := conn.SetReadDeadline(time.Now().Add(DefaultReadTimeout * time.Second)); err != nil && b.debug {
+			fmt.Println(time.Now().Format(tstamp), "SetReadDeadline error:", err)
+		}
 
 		b.receiveMux.Lock()
 		b.lastReceive = time.Now()
@@ -304,7 +309,9 @@ func (b *WebSocket) Connect() *WebSocket {
 
 	// Configure connection-level settings for persistent connections
 	conn.SetReadLimit(MaxMessageSize)
-	conn.SetReadDeadline(time.Now().Add(DefaultReadTimeout * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(DefaultReadTimeout * time.Second)); err != nil && b.debug {
+		fmt.Println(time.Now().Format(tstamp), "SetReadDeadline error:", err)
+	}
 
 	// Set up pong handler for proper ping/pong cycle
 	conn.SetPongHandler(func(appData string) error {
@@ -317,7 +324,9 @@ func (b *WebSocket) Connect() *WebSocket {
 		b.receiveMux.Unlock()
 
 		// Reset read deadline when we receive a pong
-		conn.SetReadDeadline(time.Now().Add(DefaultReadTimeout * time.Second))
+		if err := conn.SetReadDeadline(time.Now().Add(DefaultReadTimeout * time.Second)); err != nil && b.debug {
+			fmt.Println(time.Now().Format(tstamp), "SetReadDeadline error:", err)
+		}
 		return nil
 	})
 
@@ -576,7 +585,9 @@ func (b *WebSocket) send(message string) error {
 	}
 
 	// Set write deadline for persistent connection reliability
-	conn.SetWriteDeadline(time.Now().Add(DefaultWriteTimeout * time.Second))
+	if err := conn.SetWriteDeadline(time.Now().Add(DefaultWriteTimeout * time.Second)); err != nil && b.debug {
+		fmt.Println(time.Now().Format(tstamp), "SetWriteDeadline error:", err)
+	}
 
 	return conn.WriteMessage(websocket.TextMessage, []byte(message))
 }

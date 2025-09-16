@@ -50,11 +50,12 @@ func (r *request) setParam(key string, value interface{}) *request {
 
 // setParams set params with key/values to query string or body
 func (r *request) setParams(m params) *request {
-	if r.method == http.MethodGet {
+	switch r.method {
+	case http.MethodGet:
 		for k, v := range m {
 			r.setParam(k, v)
 		}
-	} else if r.method == http.MethodPost {
+	case http.MethodPost:
 		jsonData, err := json.Marshal(m)
 		if err != nil {
 			log.Fatal(err)

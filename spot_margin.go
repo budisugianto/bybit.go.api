@@ -3,8 +3,9 @@ package bybit_connector
 import (
 	"context"
 	"errors"
-	"github.com/wuhewuhe/bybit.go.api/handlers"
 	"net/http"
+
+	"github.com/wuhewuhe/bybit.go.api/handlers"
 )
 
 func (s *BybitClientRequest) GetSpotMarginData(ctx context.Context, opts ...RequestOption) (res *ServerResponse, err error) {
@@ -22,7 +23,7 @@ func (s *BybitClientRequest) GetSpotMarginData(ctx context.Context, opts ...Requ
 		endpoint: endpoint,
 		secType:  secTypeSigned,
 	}
-	data := SendRequest(ctx, opts, r, s, err)
+	data := SendRequest(ctx, opts, r, s, &err)
 	return GetServerResponse(err, data)
 }
 
@@ -42,7 +43,7 @@ func (s *BybitClientRequest) GetSpotMarginInterests(ctx context.Context, opts ..
 		endpoint: endpoint,
 		secType:  secTypeSigned,
 	}
-	data := SendRequest(ctx, opts, r, s, err)
+	data := SendRequest(ctx, opts, r, s, &err)
 	return GetServerResponse(err, data)
 }
 
@@ -137,7 +138,7 @@ func (s *BybitClientRequest) GetSpotMarginCoin(ctx context.Context, opts ...Requ
 		endpoint: "/v5/spot-cross-margin-trade/pledge-token",
 		secType:  secTypeSigned,
 	}
-	data := SendRequest(ctx, opts, r, s, err)
+	data := SendRequest(ctx, opts, r, s, &err)
 	return GetServerResponse(err, data)
 }
 
@@ -154,7 +155,7 @@ func (s *BybitClientRequest) GetSpotMarginBorrowCoin(ctx context.Context, opts .
 		endpoint: "/v5/spot-cross-margin-trade/borrow-token",
 		secType:  secTypeSigned,
 	}
-	data := SendRequest(ctx, opts, r, s, err)
+	data := SendRequest(ctx, opts, r, s, &err)
 	return GetServerResponse(err, data)
 }
 
@@ -171,7 +172,7 @@ func (s *BybitClientRequest) GetSpotMarginLoanAccountInfo(ctx context.Context, o
 		endpoint: "/v5/spot-cross-margin-trade/account",
 		secType:  secTypeSigned,
 	}
-	data := SendRequest(ctx, opts, r, s, err)
+	data := SendRequest(ctx, opts, r, s, &err)
 	return GetServerResponse(err, data)
 }
 
@@ -188,7 +189,7 @@ func (s *BybitClientRequest) GetSpotMarginBorrowOrders(ctx context.Context, opts
 		endpoint: "/v5/spot-cross-margin-trade/orders",
 		secType:  secTypeSigned,
 	}
-	data := SendRequest(ctx, opts, r, s, err)
+	data := SendRequest(ctx, opts, r, s, &err)
 	return GetServerResponse(err, data)
 }
 
@@ -205,7 +206,7 @@ func (s *BybitClientRequest) GetSpotMarginRepaymentOrders(ctx context.Context, o
 		endpoint: "/v5/spot-cross-margin-trade/repay-history",
 		secType:  secTypeSigned,
 	}
-	data := SendRequest(ctx, opts, r, s, err)
+	data := SendRequest(ctx, opts, r, s, &err)
 	return GetServerResponse(err, data)
 }
 
@@ -222,7 +223,7 @@ func (s *BybitClientRequest) BorrowSpotMarginLoan(ctx context.Context, opts ...R
 		endpoint: "/v5/spot-cross-margin-trade/loan",
 		secType:  secTypeSigned,
 	}
-	data := SendRequest(ctx, opts, r, s, err)
+	data := SendRequest(ctx, opts, r, s, &err)
 	return GetServerResponse(err, data)
 }
 
@@ -239,6 +240,6 @@ func (s *BybitClientRequest) RepaySpotMarginLoan(ctx context.Context, opts ...Re
 		endpoint: "/v5/spot-cross-margin-trade/repay",
 		secType:  secTypeSigned,
 	}
-	data := SendRequest(ctx, opts, r, s, err)
+	data := SendRequest(ctx, opts, r, s, &err)
 	return GetServerResponse(err, data)
 }

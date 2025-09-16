@@ -7,14 +7,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"github.com/wuhewuhe/bybit.go.api/models"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
 	"time"
+
+	"github.com/wuhewuhe/bybit.go.api/models"
 
 	"github.com/bitly/go-simplejson"
 	jsoniter "github.com/json-iterator/go"
@@ -22,6 +24,42 @@ import (
 )
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
+
+// transportCache holds shared HTTP transports keyed by proxy URL.
+// This enables pooling and reuse of HTTP/2 connections across multiple clients
+// to the same upstream, drastically reducing connection setup overhead.
+var transportCache sync.Map // map[string]*http.Transport
+
+func getOrCreateTransport(proxyURLStr string, logger *log.Logger) *http.Transport {
+	if v, ok := transportCache.Load(proxyURLStr); ok {
+		return v.(*http.Transport)
+	}
+
+	// Configure HTTP/2 transport with per-host limits.
+	// Note: Values chosen to match desired caps (32768 active, 1024 idle per host).
+	tr := &http.Transport{
+		ForceAttemptHTTP2:   true,
+		MaxConnsPerHost:     32768,
+		MaxIdleConnsPerHost: 1024,
+		MaxIdleConns:        8192,
+		IdleConnTimeout:     300 * time.Second,
+	}
+
+	if proxyURLStr != "" {
+		if proxyURL, err := url.Parse(proxyURLStr); err != nil {
+			if logger != nil {
+				logger.Printf("Error parsing proxy URL: %v", err)
+			}
+		} else {
+			tr.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
+
+	if actual, loaded := transportCache.LoadOrStore(proxyURLStr, tr); loaded {
+		return actual.(*http.Transport)
+	}
+	return tr
+}
 
 type BybitClientRequest struct {
 	c      *Client
@@ -37,9 +75,12 @@ type ServerResponse struct {
 	Time       int64       `json:"time"`
 }
 
-func SendRequest(ctx context.Context, opts []RequestOption, r *request, s *BybitClientRequest, err error) []byte {
+func SendRequest(ctx context.Context, opts []RequestOption, r *request, s *BybitClientRequest, err *error) (data []byte) {
 	r.setParams(s.params)
-	data, err := s.c.callAPI(ctx, r, opts...)
+	data, *err = s.c.callAPI(ctx, r, opts...)
+	if *err != nil {
+		return nil
+	}
 	return data
 }
 
@@ -138,11 +179,10 @@ func newJSON(data []byte) (j *simplejson.Json, err error) {
 // NewBybitHttpClient NewClient Create client function for initialising new Bybit client
 func NewBybitHttpClient(apiKey string, APISecret string, options ...ClientOption) *Client {
 	c := &Client{
-		APIKey:     apiKey,
-		APISecret:  APISecret,
-		BaseURL:    MAINNET,
-		HTTPClient: http.DefaultClient,
-		Logger:     log.New(os.Stderr, Name, log.LstdFlags),
+		APIKey:    apiKey,
+		APISecret: APISecret,
+		BaseURL:   MAINNET,
+		Logger:    log.New(os.Stderr, Name, log.LstdFlags),
 	}
 
 	// Apply the provided options
@@ -150,16 +190,9 @@ func NewBybitHttpClient(apiKey string, APISecret string, options ...ClientOption
 		opt(c)
 	}
 
-	if c.ProxyURL != "" {
-		proxyURL, err := url.Parse(c.ProxyURL)
-		if err != nil {
-			c.Logger.Printf("Error parsing proxy URL: %v", err)
-			return nil // Or handle this more gracefully
-		}
-		c.HTTPClient.Transport = &http.Transport{
-			Proxy: http.ProxyURL(proxyURL),
-		}
-	}
+	// Use a shared HTTP/2 transport (pooled by proxy URL) to maximize connection reuse
+	transport := getOrCreateTransport(c.ProxyURL, c.Logger)
+	c.HTTPClient = &http.Client{Transport: transport}
 
 	return c
 }
