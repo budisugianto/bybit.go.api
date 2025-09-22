@@ -451,12 +451,14 @@ func ping(b *WebSocket) {
 
 				if err := b.send(pingMessage); err != nil {
 					fmt.Println("Failed to send ping:", err)
-					// Force immediate reconnection on network connection errors
+					// Force immediate reconnection on connection-related errors
 					if strings.Contains(err.Error(), "use of closed network connection") ||
 						strings.Contains(err.Error(), "connection reset by peer") ||
-						strings.Contains(err.Error(), "broken pipe") {
+						strings.Contains(err.Error(), "broken pipe") ||
+						strings.Contains(err.Error(), "connection is nil") ||
+						strings.Contains(strings.ToLower(err.Error()), "not connected") {
 						if b.debug {
-							fmt.Println(time.Now().Format(tstamp), "Network error detected in ping, triggering reconnection")
+							fmt.Println(time.Now().Format(tstamp), "Ping detected broken connection, triggering reconnection")
 						}
 						b.setConnected(false)
 						if b.ctx.Err() == nil {
@@ -575,6 +577,16 @@ func (b *WebSocket) send(message string) error {
 	b.sendMux.Lock()
 	defer b.sendMux.Unlock()
 
+	// Do not send if context already closed
+	if b.ctx != nil && b.ctx.Err() != nil {
+		return fmt.Errorf("context closed")
+	}
+
+	// Ensure we are connected
+	if !b.isConnectedSafe() {
+		return fmt.Errorf("websocket not connected")
+	}
+
 	// Check if connection is nil before attempting to send (with mutex protection)
 	b.connMux.RLock()
 	conn := b.conn
@@ -589,5 +601,19 @@ func (b *WebSocket) send(message string) error {
 		fmt.Println(time.Now().Format(tstamp), "SetWriteDeadline error:", err)
 	}
 
-	return conn.WriteMessage(websocket.TextMessage, []byte(message))
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(message)); err != nil {
+		// On low-level network errors, flip connected state and trigger reconnection
+		msg := err.Error()
+		if strings.Contains(msg, "use of closed network connection") ||
+			strings.Contains(msg, "connection reset by peer") ||
+			strings.Contains(msg, "broken pipe") ||
+			strings.Contains(strings.ToLower(msg), "write: connection") {
+			b.setConnected(false)
+			if b.ctx != nil && b.ctx.Err() == nil {
+				go b.ReConnect(1)
+			}
+		}
+		return err
+	}
+	return nil
 }
