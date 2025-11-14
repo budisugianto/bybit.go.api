@@ -6,9 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math/rand"
+	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,6 +39,139 @@ const (
 )
 
 type MessageHandler func(message string) error
+
+// IPPoolManager manages multiple local IP addresses for outgoing WebSocket connections
+// Uses least connection algorithm to distribute connections across available IPs
+type IPPoolManager struct {
+	ipCounters map[string]*int32 // Atomic connection counters per IP
+	localAddrs []string          // List of available local IP addresses
+	mu         sync.RWMutex      // Protects localAddrs slice
+}
+
+// Global IP pool shared across all WebSocket instances
+var globalIPPool = &IPPoolManager{
+	ipCounters: make(map[string]*int32),
+	localAddrs: []string{},
+}
+
+// RegisterLocalAddresses replaces all registered local IP addresses for outgoing connections
+// This is a package-level function that overwrites any previously registered IPs
+func RegisterLocalAddresses(addrs []string) error {
+	if len(addrs) == 0 {
+		return fmt.Errorf("at least one IP address must be provided")
+	}
+
+	// Validate IP addresses
+	for _, addr := range addrs {
+		if net.ParseIP(addr) == nil {
+			return fmt.Errorf("invalid IP address: %s", addr)
+		}
+	}
+
+	globalIPPool.mu.Lock()
+	defer globalIPPool.mu.Unlock()
+
+	// Replace all IPs and reset counters
+	globalIPPool.localAddrs = make([]string, len(addrs))
+	copy(globalIPPool.localAddrs, addrs)
+	globalIPPool.ipCounters = make(map[string]*int32)
+
+	// Initialize atomic counters for each IP
+	for _, addr := range addrs {
+		var counter int32
+		globalIPPool.ipCounters[addr] = &counter
+	}
+
+	return nil
+}
+
+// SelectLeastLoadedIP selects the IP with the least connections
+// If multiple IPs have the same count, randomly selects among them
+func (m *IPPoolManager) SelectLeastLoadedIP() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if len(m.localAddrs) == 0 {
+		return "" // No IPs registered
+	}
+
+	if len(m.localAddrs) == 1 {
+		return m.localAddrs[0] // Only one IP available
+	}
+
+	// Find minimum connection count
+	minCount := int32(^uint32(0) >> 1) // Max int32
+	for _, addr := range m.localAddrs {
+		if counter, exists := m.ipCounters[addr]; exists {
+			count := atomic.LoadInt32(counter)
+			if count < minCount {
+				minCount = count
+			}
+		}
+	}
+
+	// Collect all IPs with minimum count
+	var candidates []string
+	for _, addr := range m.localAddrs {
+		if counter, exists := m.ipCounters[addr]; exists {
+			if atomic.LoadInt32(counter) == minCount {
+				candidates = append(candidates, addr)
+			}
+		}
+	}
+
+	// Random selection among candidates
+	if len(candidates) == 0 {
+		return m.localAddrs[0] // Fallback
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	return candidates[rand.Intn(len(candidates))]
+}
+
+// IncrementConnection atomically increments the connection count for an IP
+func (m *IPPoolManager) IncrementConnection(ip string) {
+	m.mu.RLock()
+	counter, exists := m.ipCounters[ip]
+	m.mu.RUnlock()
+
+	if exists && counter != nil {
+		atomic.AddInt32(counter, 1)
+	}
+}
+
+// DecrementConnection atomically decrements the connection count for an IP
+func (m *IPPoolManager) DecrementConnection(ip string) {
+	m.mu.RLock()
+	counter, exists := m.ipCounters[ip]
+	m.mu.RUnlock()
+
+	if exists && counter != nil {
+		// Ensure count doesn't go below zero
+		for {
+			old := atomic.LoadInt32(counter)
+			if old <= 0 {
+				return
+			}
+			if atomic.CompareAndSwapInt32(counter, old, old-1) {
+				return
+			}
+		}
+	}
+}
+
+// GetConnectionCount returns the current connection count for an IP (for debugging)
+func (m *IPPoolManager) GetConnectionCount(ip string) int32 {
+	m.mu.RLock()
+	counter, exists := m.ipCounters[ip]
+	m.mu.RUnlock()
+
+	if exists && counter != nil {
+		return atomic.LoadInt32(counter)
+	}
+	return 0
+}
 
 // isConnectionError checks if an error indicates a broken connection
 // Uses pre-compiled checks to avoid repeated string operations
@@ -347,7 +484,8 @@ type WebSocket struct {
 	subtopic       []string
 	isConnected    bool
 	isReconnecting bool
-	isShuttingDown bool // Prevents new operations during shutdown
+	isShuttingDown bool   // Prevents new operations during shutdown
+	boundIP        string // Sticky IP address for this connection (for reconnection)
 	debug          bool
 	wg             sync.WaitGroup
 	// Mutex lock hierarchy (acquire in this order to prevent deadlocks):
@@ -355,7 +493,7 @@ type WebSocket struct {
 	// 2. connMux (protects connection state and context)
 	// 3. sendMux/receiveMux (lowest level - protects I/O operations)
 	reconnectMux     sync.Mutex    // Level 1: Protects reconnection state
-	connMux          sync.RWMutex  // Level 2: Protects isConnected, isShuttingDown, conn, ctx, cancel
+	connMux          sync.RWMutex  // Level 2: Protects isConnected, isShuttingDown, conn, ctx, cancel, boundIP
 	sendMux          sync.Mutex    // Level 3: Protects WebSocket send operations
 	receiveMux       sync.RWMutex  // Level 3: Protects lastReceive and lastPong times
 	reconnectTrigger chan struct{} // Centralized reconnection trigger
@@ -375,6 +513,16 @@ func WithMaxAliveTime(maxAliveTime string) WebsocketOption {
 	}
 }
 
+// WithLocalAddresses registers local IP addresses for this WebSocket and all future WebSockets
+// This option also registers the IPs globally (same as calling RegisterLocalAddresses)
+func WithLocalAddresses(addrs []string) WebsocketOption {
+	return func(c *WebSocket) {
+		if err := RegisterLocalAddresses(addrs); err != nil {
+			fmt.Println(time.Now().Format(tstamp), "Failed to register local addresses:", err)
+		}
+	}
+}
+
 func NewBybitPrivateWebSocket(url, apiKey, apiSecret string, handler MessageHandler, options ...WebsocketOption) *WebSocket {
 	c := &WebSocket{
 		url:          url,
@@ -390,6 +538,13 @@ func NewBybitPrivateWebSocket(url, apiKey, apiSecret string, handler MessageHand
 		opt(c)
 	}
 
+	// Set finalizer to auto-decrement connection count on GC
+	runtime.SetFinalizer(c, func(ws *WebSocket) {
+		if ws.boundIP != "" {
+			globalIPPool.DecrementConnection(ws.boundIP)
+		}
+	})
+
 	return c
 }
 
@@ -399,6 +554,13 @@ func NewBybitPublicWebSocket(url string, handler MessageHandler) *WebSocket {
 		pingInterval: DefaultPingInterval,
 		onMessage:    handler,
 	}
+
+	// Set finalizer to auto-decrement connection count on GC
+	runtime.SetFinalizer(c, func(ws *WebSocket) {
+		if ws.boundIP != "" {
+			globalIPPool.DecrementConnection(ws.boundIP)
+		}
+	})
 
 	return c
 }
@@ -414,12 +576,46 @@ func (b *WebSocket) Connect() *WebSocket {
 		wssUrl += "?max_alive_time=" + b.maxAliveTime
 	}
 
-	dialer := &websocket.Dialer{
-		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  DefaultHandshakeTimeout * time.Second,
-		ReadBufferSize:    DefaultReadBufferSize,
-		WriteBufferSize:   DefaultWriteBufferSize,
-		EnableCompression: true,
+	// Select or reuse bound IP for sticky reconnection
+	b.connMux.Lock()
+	if b.boundIP == "" {
+		// First connection: select IP with least connections
+		b.boundIP = globalIPPool.SelectLeastLoadedIP()
+		if b.boundIP != "" {
+			// Increment connection count for selected IP
+			globalIPPool.IncrementConnection(b.boundIP)
+		}
+	}
+	selectedIP := b.boundIP
+	b.connMux.Unlock()
+
+	// Create dialer - use custom net dialer with local address binding if IP is selected
+	var dialer *websocket.Dialer
+	if selectedIP != "" {
+		// Local IP registered: use custom dialer with bound local address
+		netDialer := &net.Dialer{
+			LocalAddr: &net.TCPAddr{
+				IP: net.ParseIP(selectedIP),
+			},
+			Timeout: DefaultHandshakeTimeout * time.Second,
+		}
+		dialer = &websocket.Dialer{
+			NetDial:           netDialer.Dial,
+			Proxy:             http.ProxyFromEnvironment,
+			HandshakeTimeout:  DefaultHandshakeTimeout * time.Second,
+			ReadBufferSize:    DefaultReadBufferSize,
+			WriteBufferSize:   DefaultWriteBufferSize,
+			EnableCompression: true,
+		}
+	} else {
+		// No local IP registered: fallback to default behavior (old method)
+		dialer = &websocket.Dialer{
+			Proxy:             http.ProxyFromEnvironment,
+			HandshakeTimeout:  DefaultHandshakeTimeout * time.Second,
+			ReadBufferSize:    DefaultReadBufferSize,
+			WriteBufferSize:   DefaultWriteBufferSize,
+			EnableCompression: true,
+		}
 	}
 
 	conn, _, err := dialer.Dial(wssUrl, nil)
@@ -638,6 +834,12 @@ func (b *WebSocket) Disconnect() error {
 		b.isConnected = false
 		if b.conn != nil {
 			err = b.conn.Close()
+		}
+		// Decrement connection count for bound IP
+		if b.boundIP != "" {
+			globalIPPool.DecrementConnection(b.boundIP)
+			// Note: boundIP is intentionally NOT cleared to maintain sticky behavior
+			// The finalizer will also decrement, but DecrementConnection is safe against double-decrement
 		}
 		b.connMux.Unlock()
 
