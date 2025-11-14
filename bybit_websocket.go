@@ -335,11 +335,15 @@ func (b *WebSocket) Connect() *WebSocket {
 	b.conn = conn
 	b.connMux.Unlock()
 
+	// Set connected status BEFORE auth/send operations to avoid race condition
+	b.setConnected(true)
+
 	if b.requiresAuthentication() {
 		if err = b.sendAuth(); err != nil {
 			fmt.Println(time.Now().Format(tstamp), "Failed Connection:", fmt.Sprintf("%v", err))
 
 			// Close connection on authentication failure (with mutex protection)
+			b.setConnected(false)
 			b.connMux.Lock()
 			if b.conn != nil {
 				b.conn.Close()
@@ -349,7 +353,6 @@ func (b *WebSocket) Connect() *WebSocket {
 			return nil
 		}
 	}
-	b.setConnected(true)
 
 	// Cancel old context before creating new one to prevent resource leaks
 	if b.cancel != nil {
@@ -450,7 +453,6 @@ func ping(b *WebSocket) {
 				pingMessage := fmt.Sprintf(`{"op":"ping","req_id":"%d"}`, currentTime)
 
 				if err := b.send(pingMessage); err != nil {
-					fmt.Println("Failed to send ping:", err)
 					// Force immediate reconnection on connection-related errors
 					if strings.Contains(err.Error(), "use of closed network connection") ||
 						strings.Contains(err.Error(), "connection reset by peer") ||
@@ -464,6 +466,8 @@ func ping(b *WebSocket) {
 						if b.ctx.Err() == nil {
 							go b.ReConnect(1)
 						}
+					} else {
+						fmt.Println("Failed to send ping:", err)
 					}
 				}
 			} else {
