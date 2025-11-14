@@ -311,7 +311,7 @@ func (b *WebSocket) GetLastActivityTime() int64 {
 	lastPong := b.lastPong
 	lastReceive := b.lastReceive
 	b.receiveMux.RUnlock()
-	
+
 	// Return the more recent timestamp as Unix nanoseconds
 	if lastPong.After(lastReceive) {
 		return lastPong.UnixNano()
