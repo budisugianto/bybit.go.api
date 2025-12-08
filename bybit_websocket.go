@@ -6,13 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"math/rand"
-	"net"
 	"net/http"
-	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,139 +36,6 @@ const (
 
 type MessageHandler func(message string) error
 
-// IPPoolManager manages multiple local IP addresses for outgoing WebSocket connections
-// Uses least connection algorithm to distribute connections across available IPs
-type IPPoolManager struct {
-	ipCounters map[string]*int32 // Atomic connection counters per IP
-	localAddrs []string          // List of available local IP addresses
-	mu         sync.RWMutex      // Protects localAddrs slice
-}
-
-// Global IP pool shared across all WebSocket instances
-var globalIPPool = &IPPoolManager{
-	ipCounters: make(map[string]*int32),
-	localAddrs: []string{},
-}
-
-// RegisterLocalAddresses replaces all registered local IP addresses for outgoing connections
-// This is a package-level function that overwrites any previously registered IPs
-func RegisterLocalAddresses(addrs []string) error {
-	if len(addrs) == 0 {
-		return fmt.Errorf("at least one IP address must be provided")
-	}
-
-	// Validate IP addresses
-	for _, addr := range addrs {
-		if net.ParseIP(addr) == nil {
-			return fmt.Errorf("invalid IP address: %s", addr)
-		}
-	}
-
-	globalIPPool.mu.Lock()
-	defer globalIPPool.mu.Unlock()
-
-	// Replace all IPs and reset counters
-	globalIPPool.localAddrs = make([]string, len(addrs))
-	copy(globalIPPool.localAddrs, addrs)
-	globalIPPool.ipCounters = make(map[string]*int32)
-
-	// Initialize atomic counters for each IP
-	for _, addr := range addrs {
-		var counter int32
-		globalIPPool.ipCounters[addr] = &counter
-	}
-
-	return nil
-}
-
-// SelectLeastLoadedIP selects the IP with the least connections
-// If multiple IPs have the same count, randomly selects among them
-func (m *IPPoolManager) SelectLeastLoadedIP() string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if len(m.localAddrs) == 0 {
-		return "" // No IPs registered
-	}
-
-	if len(m.localAddrs) == 1 {
-		return m.localAddrs[0] // Only one IP available
-	}
-
-	// Find minimum connection count
-	minCount := int32(^uint32(0) >> 1) // Max int32
-	for _, addr := range m.localAddrs {
-		if counter, exists := m.ipCounters[addr]; exists {
-			count := atomic.LoadInt32(counter)
-			if count < minCount {
-				minCount = count
-			}
-		}
-	}
-
-	// Collect all IPs with minimum count
-	var candidates []string
-	for _, addr := range m.localAddrs {
-		if counter, exists := m.ipCounters[addr]; exists {
-			if atomic.LoadInt32(counter) == minCount {
-				candidates = append(candidates, addr)
-			}
-		}
-	}
-
-	// Random selection among candidates
-	if len(candidates) == 0 {
-		return m.localAddrs[0] // Fallback
-	}
-	if len(candidates) == 1 {
-		return candidates[0]
-	}
-	return candidates[rand.Intn(len(candidates))]
-}
-
-// IncrementConnection atomically increments the connection count for an IP
-func (m *IPPoolManager) IncrementConnection(ip string) {
-	m.mu.RLock()
-	counter, exists := m.ipCounters[ip]
-	m.mu.RUnlock()
-
-	if exists && counter != nil {
-		atomic.AddInt32(counter, 1)
-	}
-}
-
-// DecrementConnection atomically decrements the connection count for an IP
-func (m *IPPoolManager) DecrementConnection(ip string) {
-	m.mu.RLock()
-	counter, exists := m.ipCounters[ip]
-	m.mu.RUnlock()
-
-	if exists && counter != nil {
-		// Ensure count doesn't go below zero
-		for {
-			old := atomic.LoadInt32(counter)
-			if old <= 0 {
-				return
-			}
-			if atomic.CompareAndSwapInt32(counter, old, old-1) {
-				return
-			}
-		}
-	}
-}
-
-// GetConnectionCount returns the current connection count for an IP (for debugging)
-func (m *IPPoolManager) GetConnectionCount(ip string) int32 {
-	m.mu.RLock()
-	counter, exists := m.ipCounters[ip]
-	m.mu.RUnlock()
-
-	if exists && counter != nil {
-		return atomic.LoadInt32(counter)
-	}
-	return 0
-}
-
 // isConnectionError checks if an error indicates a broken connection
 // Uses pre-compiled checks to avoid repeated string operations
 func isConnectionError(err error) bool {
@@ -189,8 +52,8 @@ func isConnectionError(err error) bool {
 		strings.Contains(strings.ToLower(msg), "write: connection")
 }
 
-// triggerReconnect signals the reconnection manager to initiate reconnection
-// This is non-blocking and deduplicates multiple simultaneous requests
+// triggerReconnect initiates reconnection in a separate goroutine
+// This is non-blocking and deduplicates multiple simultaneous requests using isReconnecting flag
 // Safe to call from any goroutine without holding locks
 func (b *WebSocket) triggerReconnect() {
 	// Check shutdown state first
@@ -202,39 +65,9 @@ func (b *WebSocket) triggerReconnect() {
 		return // Don't reconnect during shutdown
 	}
 
-	// Check if we have a valid trigger channel
-	if b.reconnectTrigger == nil {
-		return
-	}
-	select {
-	case b.reconnectTrigger <- struct{}{}:
-		// Successfully signaled reconnection
-	default:
-		// Reconnection already triggered, skip
-	}
-}
-
-// reconnectionManager handles all reconnection requests through a single goroutine
-func (b *WebSocket) reconnectionManager() {
-	b.wg.Add(1)
-	defer b.wg.Done()
-
-	if b.debug {
-		fmt.Println(time.Now().Format(tstamp), "Starting reconnection manager", b.subtopic)
-	}
-
-	for {
-		select {
-		case <-b.reconnectTrigger:
-			// Received reconnection request
-			b.ReConnect(1)
-		case <-b.ctx.Done():
-			if b.debug {
-				fmt.Println(time.Now().Format(tstamp), "Exiting reconnection manager", b.subtopic)
-			}
-			return
-		}
-	}
+	// Spawn reconnection in separate goroutine (not tracked by wg to avoid deadlock)
+	// The setReconnecting flag prevents multiple simultaneous reconnection attempts
+	go b.ReConnect(1)
 }
 
 func (b *WebSocket) ReConnect(delay int) {
@@ -247,40 +80,53 @@ func (b *WebSocket) ReConnect(delay int) {
 	}
 	defer b.setReconnecting(false)
 
-	// Capture context early to avoid race condition with nil dereference
-	// This follows lock hierarchy: reconnectMux already held, now acquire connMux
-	b.connMux.RLock()
-	currentCtx := b.ctx
-	b.connMux.RUnlock()
+	if b.debug {
+		fmt.Println(time.Now().Format(tstamp), "Starting reconnection process ", b.subtopic)
+	}
 
-	// Check context validity before proceeding
-	if currentCtx == nil || currentCtx.Err() != nil {
+	// Step 1: Clean up existing connection (lightweight cleanup, don't wait for goroutines here)
+	b.cleanupConnection()
+
+	// Step 2: Wait for existing goroutines to finish (they will exit due to context cancellation)
+	// Use timeout to avoid infinite wait
+	done := make(chan struct{})
+	go func() {
+		b.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
 		if b.debug {
-			fmt.Println(time.Now().Format(tstamp), "Context invalid, aborting reconnection ", b.subtopic)
+			fmt.Println(time.Now().Format(tstamp), "Old goroutines finished ", b.subtopic)
+		}
+	case <-time.After(5 * time.Second):
+		if b.debug {
+			fmt.Println(time.Now().Format(tstamp), "Timeout waiting for old goroutines, proceeding anyway ", b.subtopic)
+		}
+	}
+
+	// Step 3: Check if we should abort (user called Disconnect during cleanup)
+	b.connMux.RLock()
+	shuttingDown := b.isShuttingDown
+	b.connMux.RUnlock()
+	if shuttingDown {
+		if b.debug {
+			fmt.Println(time.Now().Format(tstamp), "Shutdown requested, aborting reconnection ", b.subtopic)
 		}
 		return
 	}
 
-	if b.debug {
-		fmt.Println(time.Now().Format(tstamp), "Cleaning by disconnect ", b.subtopic)
-	}
-	// Best-effort disconnect; log error in debug mode
-	if err := b.Disconnect(); err != nil && b.debug {
-		fmt.Println(time.Now().Format(tstamp), "Disconnect error:", err)
-	}
-	b.wg.Wait()
-
-	// Keep trying to reconnect with exponential backoff
+	// Step 4: Keep trying to reconnect with exponential backoff
 	currentDelay := delay
 	for {
-		// Re-check context before each reconnection attempt
+		// Check shutdown state before each attempt
 		b.connMux.RLock()
-		currentCtx = b.ctx
+		shuttingDown = b.isShuttingDown
 		b.connMux.RUnlock()
-
-		if currentCtx == nil || currentCtx.Err() != nil {
+		if shuttingDown {
 			if b.debug {
-				fmt.Println(time.Now().Format(tstamp), "Context cancelled, stopping reconnection ", b.subtopic)
+				fmt.Println(time.Now().Format(tstamp), "Shutdown requested, stopping reconnection ", b.subtopic)
 			}
 			return
 		}
@@ -288,9 +134,9 @@ func (b *WebSocket) ReConnect(delay int) {
 		if b.debug {
 			fmt.Println(time.Now().Format(tstamp), "Attempting to reconnect ", b.subtopic)
 		}
+
 		con := b.Connect()
 		if con != nil {
-			b.setConnected(true)
 			if b.debug {
 				fmt.Println(time.Now().Format(tstamp), "Reconnection successful ", b.subtopic)
 			}
@@ -300,25 +146,61 @@ func (b *WebSocket) ReConnect(delay int) {
 		if b.debug {
 			fmt.Println(time.Now().Format(tstamp), "Reconnection failed, retrying in", currentDelay, "seconds")
 		}
-		b.setConnected(false)
 
-		// Use interruptible sleep that responds to context cancellation
-		timer := time.NewTimer(time.Duration(currentDelay) * time.Second)
-		select {
-		case <-timer.C:
-			// Normal delay completed
-		case <-currentCtx.Done():
-			timer.Stop()
-			if b.debug {
-				fmt.Println(time.Now().Format(tstamp), "Context cancelled during sleep, stopping reconnection")
+		// Interruptible sleep with shutdown check
+		// Poll for shutdown every 500ms during the delay
+		sleepRemaining := time.Duration(currentDelay) * time.Second
+		sleepInterval := 500 * time.Millisecond
+		aborted := false
+		for sleepRemaining > 0 {
+			// Check shutdown before sleeping
+			b.connMux.RLock()
+			shuttingDown = b.isShuttingDown
+			b.connMux.RUnlock()
+			if shuttingDown {
+				if b.debug {
+					fmt.Println(time.Now().Format(tstamp), "Shutdown detected during reconnect delay, aborting")
+				}
+				aborted = true
+				break
 			}
+
+			// Sleep for the smaller of remaining time or interval
+			sleepTime := sleepInterval
+			if sleepRemaining < sleepInterval {
+				sleepTime = sleepRemaining
+			}
+			time.Sleep(sleepTime)
+			sleepRemaining -= sleepTime
+		}
+		if aborted {
 			return
 		}
 
-		if currentDelay <= MaxReconnectionDelay {
+		// Exponential backoff with cap
+		if currentDelay < MaxReconnectionDelay {
 			currentDelay *= 2
+			if currentDelay > MaxReconnectionDelay {
+				currentDelay = MaxReconnectionDelay
+			}
 		}
 	}
+}
+
+// cleanupConnection closes the connection and cancels context without waiting for goroutines
+// This is used internally by ReConnect to avoid deadlock
+func (b *WebSocket) cleanupConnection() {
+	b.connMux.Lock()
+	if b.cancel != nil {
+		b.cancel()
+		b.cancel = nil // Clear cancel to signal cleanup is complete
+	}
+	b.isConnected = false
+	if b.conn != nil {
+		b.conn.Close()
+		b.conn = nil
+	}
+	b.connMux.Unlock()
 }
 
 func (b *WebSocket) handleIncomingMessages() {
@@ -403,10 +285,12 @@ func (b *WebSocket) monitorConnection() {
 			lastReceive := b.lastReceive
 			b.receiveMux.RUnlock()
 
-			// Only trigger reconnection if timeout exceeded (single trigger point)
-			if time.Since(lastReceive) > time.Duration(b.pingInterval)*time.Second {
+			// Only trigger reconnection if no data received for 2x pingInterval
+			// This gives enough time for at least one ping-pong cycle
+			staleTimeout := time.Duration(b.pingInterval*2) * time.Second
+			if time.Since(lastReceive) > staleTimeout {
 				if b.debug {
-					fmt.Println(time.Now().Format(tstamp), "No data received within ping interval ", b.subtopic)
+					fmt.Println(time.Now().Format(tstamp), "No data received within stale timeout ", b.subtopic)
 				}
 				b.setConnected(false)
 				b.triggerReconnect()
@@ -484,19 +368,17 @@ type WebSocket struct {
 	subtopic       []string
 	isConnected    bool
 	isReconnecting bool
-	isShuttingDown bool   // Prevents new operations during shutdown
-	boundIP        string // Sticky IP address for this connection (for reconnection)
+	isShuttingDown bool // Prevents new operations during shutdown
 	debug          bool
 	wg             sync.WaitGroup
 	// Mutex lock hierarchy (acquire in this order to prevent deadlocks):
 	// 1. reconnectMux (highest level - controls reconnection state)
 	// 2. connMux (protects connection state and context)
 	// 3. sendMux/receiveMux (lowest level - protects I/O operations)
-	reconnectMux     sync.Mutex    // Level 1: Protects reconnection state
-	connMux          sync.RWMutex  // Level 2: Protects isConnected, isShuttingDown, conn, ctx, cancel, boundIP
-	sendMux          sync.Mutex    // Level 3: Protects WebSocket send operations
-	receiveMux       sync.RWMutex  // Level 3: Protects lastReceive and lastPong times
-	reconnectTrigger chan struct{} // Centralized reconnection trigger
+	reconnectMux sync.Mutex   // Level 1: Protects reconnection state
+	connMux      sync.RWMutex // Level 2: Protects isConnected, isShuttingDown, conn, ctx, cancel
+	sendMux      sync.Mutex   // Level 3: Protects WebSocket send operations
+	receiveMux   sync.RWMutex // Level 3: Protects lastReceive and lastPong times
 }
 
 type WebsocketOption func(*WebSocket)
@@ -510,16 +392,6 @@ func WithPingInterval(pingInterval int) WebsocketOption {
 func WithMaxAliveTime(maxAliveTime string) WebsocketOption {
 	return func(c *WebSocket) {
 		c.maxAliveTime = maxAliveTime
-	}
-}
-
-// WithLocalAddresses registers local IP addresses for this WebSocket and all future WebSockets
-// This option also registers the IPs globally (same as calling RegisterLocalAddresses)
-func WithLocalAddresses(addrs []string) WebsocketOption {
-	return func(c *WebSocket) {
-		if err := RegisterLocalAddresses(addrs); err != nil {
-			fmt.Println(time.Now().Format(tstamp), "Failed to register local addresses:", err)
-		}
 	}
 }
 
@@ -538,29 +410,20 @@ func NewBybitPrivateWebSocket(url, apiKey, apiSecret string, handler MessageHand
 		opt(c)
 	}
 
-	// Set finalizer to auto-decrement connection count on GC
-	runtime.SetFinalizer(c, func(ws *WebSocket) {
-		if ws.boundIP != "" {
-			globalIPPool.DecrementConnection(ws.boundIP)
-		}
-	})
-
 	return c
 }
 
-func NewBybitPublicWebSocket(url string, handler MessageHandler) *WebSocket {
+func NewBybitPublicWebSocket(url string, handler MessageHandler, options ...WebsocketOption) *WebSocket {
 	c := &WebSocket{
 		url:          url,
 		pingInterval: DefaultPingInterval,
 		onMessage:    handler,
 	}
 
-	// Set finalizer to auto-decrement connection count on GC
-	runtime.SetFinalizer(c, func(ws *WebSocket) {
-		if ws.boundIP != "" {
-			globalIPPool.DecrementConnection(ws.boundIP)
-		}
-	})
+	// Apply the provided options
+	for _, opt := range options {
+		opt(c)
+	}
 
 	return c
 }
@@ -576,51 +439,17 @@ func (b *WebSocket) Connect() *WebSocket {
 		wssUrl += "?max_alive_time=" + b.maxAliveTime
 	}
 
-	// Select or reuse bound IP for sticky reconnection
-	b.connMux.Lock()
-	if b.boundIP == "" {
-		// First connection: select IP with least connections
-		b.boundIP = globalIPPool.SelectLeastLoadedIP()
-		if b.boundIP != "" {
-			// Increment connection count for selected IP
-			globalIPPool.IncrementConnection(b.boundIP)
-		}
-	}
-	selectedIP := b.boundIP
-	b.connMux.Unlock()
-
-	// Create dialer - use custom net dialer with local address binding if IP is selected
-	var dialer *websocket.Dialer
-	if selectedIP != "" {
-		// Local IP registered: use custom dialer with bound local address
-		netDialer := &net.Dialer{
-			LocalAddr: &net.TCPAddr{
-				IP: net.ParseIP(selectedIP),
-			},
-			Timeout: DefaultHandshakeTimeout * time.Second,
-		}
-		dialer = &websocket.Dialer{
-			NetDial:           netDialer.Dial,
-			Proxy:             http.ProxyFromEnvironment,
-			HandshakeTimeout:  DefaultHandshakeTimeout * time.Second,
-			ReadBufferSize:    DefaultReadBufferSize,
-			WriteBufferSize:   DefaultWriteBufferSize,
-			EnableCompression: true,
-		}
-	} else {
-		// No local IP registered: fallback to default behavior (old method)
-		dialer = &websocket.Dialer{
-			Proxy:             http.ProxyFromEnvironment,
-			HandshakeTimeout:  DefaultHandshakeTimeout * time.Second,
-			ReadBufferSize:    DefaultReadBufferSize,
-			WriteBufferSize:   DefaultWriteBufferSize,
-			EnableCompression: true,
-		}
+	dialer := &websocket.Dialer{
+		Proxy:             http.ProxyFromEnvironment,
+		HandshakeTimeout:  DefaultHandshakeTimeout * time.Second,
+		ReadBufferSize:    DefaultReadBufferSize,
+		WriteBufferSize:   DefaultWriteBufferSize,
+		EnableCompression: true,
 	}
 
 	conn, _, err := dialer.Dial(wssUrl, nil)
 	if err != nil {
-		fmt.Printf("%s Failed Dial: %v", time.Now().Format(tstamp), err)
+		fmt.Printf("%s Failed Dial: %v\n", time.Now().Format(tstamp), err)
 		return nil
 	}
 
@@ -673,8 +502,13 @@ func (b *WebSocket) Connect() *WebSocket {
 	}
 
 	// Properly cleanup old context and wait for goroutines to finish
-	if b.cancel != nil {
-		b.cancel()
+	// Check cancel under lock to avoid race condition
+	b.connMux.Lock()
+	oldCancel := b.cancel
+	b.connMux.Unlock()
+
+	if oldCancel != nil {
+		oldCancel()
 		// Wait briefly for old goroutines to finish before starting new ones
 		// Use a timeout to avoid blocking indefinitely
 		done := make(chan struct{})
@@ -698,18 +532,17 @@ func (b *WebSocket) Connect() *WebSocket {
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.connMux.Unlock()
 
-	// Initialize reconnection trigger channel if not already created
-	if b.reconnectTrigger == nil {
-		b.reconnectTrigger = make(chan struct{}, 1)
-		go b.reconnectionManager()
-	}
-
 	go b.handleIncomingMessages()
 	go b.monitorConnection()
 	go ping(b)
 
-	if len(b.subtopic) > 0 {
-		_, err := b.SendSubscription(b.subtopic)
+	// Read subtopic under lock to avoid race with SendSubscription
+	b.connMux.RLock()
+	subtopicCopy := b.subtopic
+	b.connMux.RUnlock()
+
+	if len(subtopicCopy) > 0 {
+		_, err := b.SendSubscription(subtopicCopy)
 		if err != nil {
 			// Cleanup resources if subscription fails
 			if b.debug {
@@ -737,7 +570,11 @@ func (b *WebSocket) Connect() *WebSocket {
 }
 
 func (b *WebSocket) SendSubscription(args []string) (*WebSocket, error) {
+	// Protect subtopic with connMux since it's accessed during reconnection
+	b.connMux.Lock()
 	b.subtopic = args
+	b.connMux.Unlock()
+
 	reqID := uuid.New().String()
 	subMessage := map[string]interface{}{
 		"req_id": reqID,
@@ -830,16 +667,12 @@ func (b *WebSocket) Disconnect() error {
 		b.isShuttingDown = true
 		if b.cancel != nil {
 			b.cancel()
+			b.cancel = nil // Clear for consistency with cleanupConnection
 		}
 		b.isConnected = false
 		if b.conn != nil {
 			err = b.conn.Close()
-		}
-		// Decrement connection count for bound IP
-		if b.boundIP != "" {
-			globalIPPool.DecrementConnection(b.boundIP)
-			// Note: boundIP is intentionally NOT cleared to maintain sticky behavior
-			// The finalizer will also decrement, but DecrementConnection is safe against double-decrement
+			b.conn = nil
 		}
 		b.connMux.Unlock()
 
