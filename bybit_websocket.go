@@ -195,6 +195,8 @@ func (b *WebSocket) cleanupConnection() {
 		b.cancel()
 		b.cancel = nil // Clear cancel to signal cleanup is complete
 	}
+	// Clear ctx as well so subsequent Connect() doesn't attempt writes with a cancelled context
+	b.ctx = nil
 	b.isConnected = false
 	if b.conn != nil {
 		b.conn.Close()
@@ -439,6 +441,33 @@ func (b *WebSocket) Connect() *WebSocket {
 		wssUrl += "?max_alive_time=" + b.maxAliveTime
 	}
 
+	// Cancel any previous context early.
+	// Important: sendAuth()/SendSubscription() use send(), which checks b.ctx.
+	b.connMux.Lock()
+	oldCancel := b.cancel
+	b.cancel = nil
+	b.ctx = nil
+	b.connMux.Unlock()
+	if oldCancel != nil {
+		oldCancel()
+		// Wait briefly for old goroutines to finish before starting new ones
+		// Use a timeout to avoid blocking indefinitely
+		done := make(chan struct{})
+		go func() {
+			b.wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+			// Goroutines finished
+		case <-time.After(2 * time.Second):
+			// Timeout - proceed anyway but log
+			if b.debug {
+				fmt.Println(time.Now().Format(tstamp), "Timeout waiting for old goroutines")
+			}
+		}
+	}
+
 	dialer := &websocket.Dialer{
 		Proxy:             http.ProxyFromEnvironment,
 		HandshakeTimeout:  DefaultHandshakeTimeout * time.Second,
@@ -476,8 +505,10 @@ func (b *WebSocket) Connect() *WebSocket {
 		return nil
 	})
 
-	// Safely assign connection with mutex protection and clear shutdown flag
+	// Create a fresh context for this connection BEFORE any auth/subscription writes.
+	// Also assign connection with mutex protection and clear shutdown flag.
 	b.connMux.Lock()
+	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.conn = conn
 	b.isShuttingDown = false // Clear shutdown flag on successful connection
 	b.connMux.Unlock()
@@ -500,37 +531,6 @@ func (b *WebSocket) Connect() *WebSocket {
 			return nil
 		}
 	}
-
-	// Properly cleanup old context and wait for goroutines to finish
-	// Check cancel under lock to avoid race condition
-	b.connMux.Lock()
-	oldCancel := b.cancel
-	b.connMux.Unlock()
-
-	if oldCancel != nil {
-		oldCancel()
-		// Wait briefly for old goroutines to finish before starting new ones
-		// Use a timeout to avoid blocking indefinitely
-		done := make(chan struct{})
-		go func() {
-			b.wg.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-			// Goroutines finished
-		case <-time.After(2 * time.Second):
-			// Timeout - proceed anyway but log
-			if b.debug {
-				fmt.Println(time.Now().Format(tstamp), "Timeout waiting for old goroutines")
-			}
-		}
-	}
-
-	// Create context before starting goroutines
-	b.connMux.Lock()
-	b.ctx, b.cancel = context.WithCancel(context.Background())
-	b.connMux.Unlock()
 
 	go b.handleIncomingMessages()
 	go b.monitorConnection()
@@ -669,6 +669,7 @@ func (b *WebSocket) Disconnect() error {
 			b.cancel()
 			b.cancel = nil // Clear for consistency with cleanupConnection
 		}
+		b.ctx = nil
 		b.isConnected = false
 		if b.conn != nil {
 			err = b.conn.Close()
