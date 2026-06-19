@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/wuhewuhe/bybit.go.api/models"
+	"github.com/budisugianto/bybit.go.api/models"
 )
 
 func (s *BybitClientRequest) GetOrderPriceLimit(ctx context.Context, opts ...RequestOption) (res *ServerResponse, err error) {
