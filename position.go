@@ -7,6 +7,19 @@ import (
 	"github.com/wuhewuhe/bybit.go.api/handlers"
 )
 
+func (s *BybitClientRequest) GetFutureLeverage(ctx context.Context, opts ...RequestOption) (res *ServerResponse, err error) {
+	if err = handlers.ValidateParams(s.params); err != nil {
+		return nil, err
+	}
+	r := &request{
+		method:   http.MethodGet,
+		endpoint: "/v5/position/symbol-info",
+		secType:  secTypeSigned,
+	}
+	data := SendRequest(ctx, opts, r, s, &err)
+	return GetServerResponse(err, data)
+}
+
 func (s *BybitClientRequest) GetPositionList(ctx context.Context, opts ...RequestOption) (res *ServerResponse, err error) {
 	if err = handlers.ValidateParams(s.params); err != nil {
 		return nil, err

@@ -8,6 +8,16 @@ import (
 	"github.com/wuhewuhe/bybit.go.api/models"
 )
 
+func (s *BybitClientRequest) GetOrderPriceLimit(ctx context.Context, opts ...RequestOption) (res *ServerResponse, err error) {
+	r := &request{
+		method:   http.MethodGet,
+		endpoint: "/v5/market/price-limit",
+		secType:  secTypeNone,
+	}
+	data := SendRequest(ctx, opts, r, s, &err)
+	return GetServerResponse(err, data)
+}
+
 func (s *BybitClientRequest) GetServerTime(ctx context.Context, opts ...RequestOption) (res *ServerResponse, err error) {
 	r := &request{
 		method:   http.MethodGet,

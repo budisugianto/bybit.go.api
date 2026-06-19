@@ -15,7 +15,7 @@ const (
 	secTypeSigned         // private request
 )
 
-type params map[string]interface{}
+type params map[string]any
 
 // request define an API request
 type request struct {
@@ -31,7 +31,7 @@ type request struct {
 }
 
 // addParam add param with key/value to query string
-func (r *request) addParam(key string, value interface{}) *request {
+func (r *request) addParam(key string, value any) *request {
 	if r.query == nil {
 		r.query = url.Values{}
 	}
@@ -40,7 +40,7 @@ func (r *request) addParam(key string, value interface{}) *request {
 }
 
 // setParam set param with key/value to query string
-func (r *request) setParam(key string, value interface{}) *request {
+func (r *request) setParam(key string, value any) *request {
 	if r.query == nil {
 		r.query = url.Values{}
 	}

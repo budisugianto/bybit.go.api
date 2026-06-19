@@ -72,9 +72,9 @@ type MarketPremiumIndexPriceKlineResponse struct {
 }
 
 type InstrumentInfoResponse struct {
-	Category       Category      `json:"category"`
-	NextPageCursor string        `json:"nextPageCursor"`
-	List           []interface{} `json:"list"`
+	Category       Category `json:"category"`
+	NextPageCursor string   `json:"nextPageCursor"`
+	List           []any    `json:"list"`
 }
 
 type SpotInstrument struct {
