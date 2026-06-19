@@ -11,10 +11,10 @@ func (s *BybitClientRequest) GetTransferableAmount(ctx context.Context, opts ...
 	if err = handlers.ValidateParams(s.params); err != nil {
 		return nil, err
 	}
-	var endpoint string = "/v5/account/withdrawal"
+
 	r := &request{
 		method:   http.MethodGet,
-		endpoint: endpoint,
+		endpoint: "/v5/account/withdrawal",
 		secType:  secTypeSigned,
 	}
 	data := SendRequest(ctx, opts, r, s, &err)
