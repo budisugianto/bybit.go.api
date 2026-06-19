@@ -63,16 +63,16 @@ func getOrCreateTransport(proxyURLStr string, logger *log.Logger) *http.Transpor
 
 type BybitClientRequest struct {
 	c      *Client
-	params map[string]interface{}
+	params map[string]any
 	isUta  bool
 }
 
 type ServerResponse struct {
-	RetCode    int         `json:"retCode"`
-	RetMsg     string      `json:"retMsg"`
-	Result     interface{} `json:"result"`
-	RetExtInfo struct{}    `json:"retExtInfo"`
-	Time       int64       `json:"time"`
+	RetCode    int      `json:"retCode"`
+	RetMsg     string   `json:"retMsg"`
+	Result     any      `json:"result"`
+	RetExtInfo struct{} `json:"retExtInfo"`
+	Time       int64    `json:"time"`
 }
 
 func SendRequest(ctx context.Context, opts []RequestOption, r *request, s *BybitClientRequest, err *error) (data []byte) {
@@ -145,12 +145,12 @@ func WithProxyURL(proxyURL string) ClientOption {
 	}
 }
 
-func PrettyPrint(i interface{}) string {
+func PrettyPrint(i any) string {
 	s, _ := json.MarshalIndent(i, "", " ")
 	return string(s)
 }
 
-func (c *Client) debug(format string, v ...interface{}) {
+func (c *Client) debug(format string, v ...any) {
 	if c.Debug {
 		c.Logger.Printf(format, v...)
 	}
@@ -313,7 +313,7 @@ func (c *Client) NewPlaceOrderService(category, symbol, side, orderType, qty str
 	}
 }
 
-func (c *Client) NewUtaBybitServiceWithParams(params map[string]interface{}) *BybitClientRequest {
+func (c *Client) NewUtaBybitServiceWithParams(params map[string]any) *BybitClientRequest {
 	return &BybitClientRequest{
 		c:      c,
 		params: params,
@@ -328,7 +328,7 @@ func (c *Client) NewUtaBybitServiceNoParams() *BybitClientRequest {
 	}
 }
 
-func (c *Client) NewClassicalBybitServiceWithParams(params map[string]interface{}) *BybitClientRequest {
+func (c *Client) NewClassicalBybitServiceWithParams(params map[string]any) *BybitClientRequest {
 	return &BybitClientRequest{
 		c:      c,
 		params: params,

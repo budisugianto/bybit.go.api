@@ -188,10 +188,7 @@ func (b *WebSocket) ReConnect(delay int) {
 			}
 
 			// Sleep for the smaller of remaining time or interval
-			sleepTime := sleepInterval
-			if sleepRemaining < sleepInterval {
-				sleepTime = sleepRemaining
-			}
+			sleepTime := min(sleepRemaining, sleepInterval)
 			time.Sleep(sleepTime)
 			sleepRemaining -= sleepTime
 		}
@@ -484,13 +481,13 @@ func WithHandlerQueueSize(size int) WebsocketOption {
 
 func NewBybitPrivateWebSocket(url, apiKey, apiSecret string, handler MessageHandler, options ...WebsocketOption) *WebSocket {
 	c := &WebSocket{
-		url:          url,
-		apiKey:       apiKey,
-		apiSecret:    apiSecret,
-		maxAliveTime: "",
-		pingInterval: DefaultPingInterval,
+		url:            url,
+		apiKey:         apiKey,
+		apiSecret:      apiSecret,
+		maxAliveTime:   "",
+		pingInterval:   DefaultPingInterval,
 		handlerQueueSz: 100,
-		onMessage:    handler,
+		onMessage:      handler,
 	}
 
 	// Apply the provided options
@@ -503,10 +500,10 @@ func NewBybitPrivateWebSocket(url, apiKey, apiSecret string, handler MessageHand
 
 func NewBybitPublicWebSocket(url string, handler MessageHandler, options ...WebsocketOption) *WebSocket {
 	c := &WebSocket{
-		url:          url,
-		pingInterval: DefaultPingInterval,
+		url:            url,
+		pingInterval:   DefaultPingInterval,
 		handlerQueueSz: 100,
-		onMessage:    handler,
+		onMessage:      handler,
 	}
 
 	// Apply the provided options
@@ -727,7 +724,7 @@ func (b *WebSocket) SendSubscription(args []string) (*WebSocket, error) {
 	b.connMux.Unlock()
 
 	reqID := uuid.New().String()
-	subMessage := map[string]interface{}{
+	subMessage := map[string]any{
 		"req_id": reqID,
 		"op":     "subscribe",
 		"args":   argsCopy,
@@ -746,13 +743,13 @@ func (b *WebSocket) SendSubscription(args []string) (*WebSocket, error) {
 }
 
 // sendRequest sends a custom request over the WebSocket connection.
-func (b *WebSocket) sendRequest(op string, args map[string]interface{}, headers map[string]string) error {
+func (b *WebSocket) sendRequest(op string, args map[string]any, headers map[string]string) error {
 	reqID := uuid.New().String()
-	request := map[string]interface{}{
+	request := map[string]any{
 		"reqId":  reqID,
 		"header": headers,
 		"op":     op,
-		"args":   []interface{}{args},
+		"args":   []any{args},
 	}
 	if b.debug {
 		fmt.Println("request headers:", fmt.Sprintf("%v", request["header"]))
@@ -950,10 +947,10 @@ func (b *WebSocket) sendAuth() error {
 		fmt.Println("signature generated : " + signature)
 	}
 
-	authMessage := map[string]interface{}{
+	authMessage := map[string]any{
 		"req_id": uuid.New().String(),
 		"op":     "auth",
-		"args":   []interface{}{b.apiKey, expires, signature},
+		"args":   []any{b.apiKey, expires, signature},
 	}
 	if b.debug {
 		fmt.Println("auth args:", fmt.Sprintf("%v", authMessage["args"]))
@@ -961,7 +958,7 @@ func (b *WebSocket) sendAuth() error {
 	return b.sendAsJson(authMessage)
 }
 
-func (b *WebSocket) sendAsJson(v interface{}) error {
+func (b *WebSocket) sendAsJson(v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
