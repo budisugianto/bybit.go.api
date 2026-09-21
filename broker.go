@@ -4,8 +4,38 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/wuhewuhe/bybit.go.api/handlers"
+	"github.com/budisugianto/bybit.go.api/handlers"
 )
+
+// GetBrokerWhitelistIP queries broker whitelist IPs from a whitelisted IP address.
+func (s *BybitClientRequest) GetBrokerWhitelistIP(ctx context.Context, opts ...RequestOption) (res *ServerResponse, err error) {
+	if err = handlers.ValidateParams(s.params); err != nil {
+		return nil, err
+	}
+
+	r := &request{
+		method:   http.MethodGet,
+		endpoint: "/v5/broker/whitelist/ip",
+		secType:  secTypeNone,
+	}
+	data := SendRequest(ctx, opts, r, s, &err)
+	return GetServerResponse(err, data)
+}
+
+// GetBrokerWhitelistIPSigned queries broker whitelist IPs with a signed request.
+func (s *BybitClientRequest) GetBrokerWhitelistIPSigned(ctx context.Context, opts ...RequestOption) (res *ServerResponse, err error) {
+	if err = handlers.ValidateParams(s.params); err != nil {
+		return nil, err
+	}
+
+	r := &request{
+		method:   http.MethodGet,
+		endpoint: "/v5/broker/whitelist/ip",
+		secType:  secTypeSigned,
+	}
+	data := SendRequest(ctx, opts, r, s, &err)
+	return GetServerResponse(err, data)
+}
 
 func (s *BybitClientRequest) GetBrokerEarning(ctx context.Context, opts ...RequestOption) (res *ServerResponse, err error) {
 	if err = handlers.ValidateParams(s.params); err != nil {
